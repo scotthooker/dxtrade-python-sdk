@@ -54,7 +54,8 @@ def session_credentials():
     """Session credentials fixture."""
     return SessionCredentials(
         username="test_user",
-        password="test_password"
+        password="test_password",
+        domain="default"
     )
 
 

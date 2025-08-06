@@ -182,6 +182,33 @@ class DXtradeClient:
     
     # Convenience methods for common operations
     
+    async def login(self) -> bool:
+        """Perform login for session-based authentication.
+        
+        This is automatically called when needed for session auth,
+        but can be called manually to pre-authenticate.
+        
+        Returns:
+            True if login successful
+            
+        Raises:
+            DXtradeAuthenticationError: Login failed
+        """
+        from dxtrade.auth import SessionHandler
+        
+        if isinstance(self._auth_handler, SessionHandler):
+            # Force refresh of session token
+            await self._auth_handler._refresh_session_token(self._http_client._client)
+            return True
+        return False
+    
+    async def logout(self) -> None:
+        """Perform logout for session-based authentication."""
+        from dxtrade.auth import SessionHandler
+        
+        if isinstance(self._auth_handler, SessionHandler):
+            await self._auth_handler.logout(self._http_client._client)
+    
     async def get_server_time(self):
         """Get server time (convenience method)."""
         return await self.instruments.get_server_time()

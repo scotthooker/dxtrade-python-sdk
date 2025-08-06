@@ -138,7 +138,19 @@ class SessionCredentials(Credentials):
     """Session-based authentication credentials."""
     username: str = Field(..., description="Username")
     password: str = Field(..., description="Password", repr=False)
-    session_token: Optional[str] = Field(None, description="Session token")
+    domain: str = Field("default", description="Login domain")
+
+
+# ============================================================================
+# Authentication Response Models
+# ============================================================================
+
+class LoginResponse(DXtradeBaseModel):
+    """Login response from DXtrade API."""
+    sessionToken: str = Field(..., description="Session authentication token")
+    expiresIn: Optional[int] = Field(None, description="Token expiration time in seconds")
+    userId: Optional[str] = Field(None, description="User identifier")
+    accounts: Optional[List[str]] = Field(None, description="Available account IDs")
 
 
 # ============================================================================

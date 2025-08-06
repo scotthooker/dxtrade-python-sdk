@@ -194,8 +194,9 @@ class SessionHandler(AuthHandler):
             )
         super().__init__(credentials)
         self.credentials: SessionCredentials = credentials
-        self._session_token: Optional[str] = credentials.session_token
+        self._session_token: Optional[str] = None
         self._token_expires_at: Optional[float] = None
+        self._last_login: Optional[float] = None
 
     async def authenticate(
         self,
@@ -221,7 +222,9 @@ class SessionHandler(AuthHandler):
         if not self._session_token:
             raise DXtradeAuthenticationError("Failed to obtain session token")
         
-        request.headers["Authorization"] = f"Bearer {self._session_token}"
+        # Add both X-Auth-Token and Authorization headers as shown in the example
+        request.headers["X-Auth-Token"] = self._session_token
+        request.headers["Authorization"] = f"DXAPI {self._session_token}"
         return request
 
     async def _refresh_session_token(self, client: httpx.AsyncClient) -> None:
@@ -237,26 +240,25 @@ class SessionHandler(AuthHandler):
             login_data = {
                 "username": self.credentials.username,
                 "password": self.credentials.password,
+                "domain": self.credentials.domain or "default",
             }
             
-            response = await client.post("/auth/login", json=login_data)
+            response = await client.post("/login", json=login_data)
             response.raise_for_status()
             
             data = response.json()
-            if not data.get("success"):
-                raise DXtradeAuthenticationError(
-                    data.get("message", "Login failed")
-                )
             
-            token_data = data.get("data", {})
-            self._session_token = token_data.get("token")
-            
-            # Set token expiration (assuming 1 hour if not provided)
-            expires_in = token_data.get("expires_in", 3600)
-            self._token_expires_at = time.time() + expires_in - 300  # 5 min buffer
+            # Extract session token directly from response
+            self._session_token = data.get("sessionToken")
             
             if not self._session_token:
-                raise DXtradeAuthenticationError("No token in login response")
+                raise DXtradeAuthenticationError(
+                    data.get("message", "No session token in response")
+                )
+            
+            # Set token expiration (default to 1 hour as per example)
+            self._token_expires_at = time.time() + 3600 - 300  # 1 hour with 5 min buffer
+            self._last_login = time.time()
                 
         except httpx.HTTPError as e:
             raise DXtradeAuthenticationError(f"Login request failed: {e}") from e
@@ -267,8 +269,13 @@ class SessionHandler(AuthHandler):
         Returns:
             True if token is expired or expiring soon
         """
-        if not self._token_expires_at:
+        if not self._token_expires_at or not self._last_login:
             return True
+        
+        # Re-login if session is older than 1 hour (as per example)
+        if (time.time() - self._last_login) > 3600:
+            return True
+            
         return time.time() >= self._token_expires_at
 
     def get_auth_type(self) -> AuthType:
@@ -290,14 +297,18 @@ class SessionHandler(AuthHandler):
         
         try:
             # Try to invalidate token on server
-            headers = {"Authorization": f"Bearer {self._session_token}"}
-            await client.post("/auth/logout", headers=headers)
+            headers = {
+                "X-Auth-Token": self._session_token,
+                "Authorization": f"DXAPI {self._session_token}"
+            }
+            await client.post("/logout", headers=headers)
         except httpx.HTTPError:
             # Ignore logout errors - we'll clear the token anyway
             pass
         finally:
             self._session_token = None
             self._token_expires_at = None
+            self._last_login = None
 
 
 class AuthFactory:

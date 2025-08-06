@@ -183,15 +183,16 @@ class TestSessionHandler:
         with pytest.raises(DXtradeConfigurationError):
             SessionHandler(bearer_token_credentials)
     
-    def test_init_with_existing_token(self):
-        """Test initialization with existing session token."""
+    def test_init_without_token(self):
+        """Test initialization without existing session token."""
         credentials = SessionCredentials(
             username="test_user",
             password="test_password",
-            session_token="existing_token"
+            domain="default"
         )
         handler = SessionHandler(credentials)
-        assert handler._session_token == "existing_token"
+        assert handler._session_token is None
+        assert handler._last_login is None
     
     @pytest.mark.asyncio
     async def test_authenticate_with_valid_token(self, session_credentials):
@@ -199,6 +200,7 @@ class TestSessionHandler:
         handler = SessionHandler(session_credentials)
         handler._session_token = "valid_token"
         handler._token_expires_at = time.time() + 3600  # 1 hour from now
+        handler._last_login = time.time()  # Just logged in
         
         request = MagicMock(spec=httpx.Request)
         request.headers = {}
@@ -206,7 +208,8 @@ class TestSessionHandler:
         
         authenticated_request = await handler.authenticate(request, client)
         
-        assert authenticated_request.headers["Authorization"] == "Bearer valid_token"
+        assert authenticated_request.headers["X-Auth-Token"] == "valid_token"
+        assert authenticated_request.headers["Authorization"] == "DXAPI valid_token"
     
     @pytest.mark.asyncio
     async def test_authenticate_requires_login(self, session_credentials):
@@ -214,15 +217,14 @@ class TestSessionHandler:
         handler = SessionHandler(session_credentials)
         # No existing token
         
-        # Mock successful login response
+        # Mock successful login response (DXTrade format)
         login_response = MagicMock(spec=httpx.Response)
         login_response.raise_for_status.return_value = None
         login_response.json.return_value = {
-            "success": True,
-            "data": {
-                "token": "new_session_token",
-                "expires_in": 3600
-            }
+            "sessionToken": "new_session_token",
+            "expiresIn": 3600,
+            "userId": "user123",
+            "accounts": ["account1", "account2"]
         }
         
         client = AsyncMock(spec=httpx.AsyncClient)
@@ -233,27 +235,28 @@ class TestSessionHandler:
         
         authenticated_request = await handler.authenticate(request, client)
         
-        # Verify login was called
+        # Verify login was called with domain
         client.post.assert_called_once_with(
-            "/auth/login",
-            json={"username": "test_user", "password": "test_password"}
+            "/login",
+            json={"username": "test_user", "password": "test_password", "domain": "default"}
         )
         
         # Verify token was set
         assert handler._session_token == "new_session_token"
-        assert authenticated_request.headers["Authorization"] == "Bearer new_session_token"
+        assert authenticated_request.headers["X-Auth-Token"] == "new_session_token"
+        assert authenticated_request.headers["Authorization"] == "DXAPI new_session_token"
     
     @pytest.mark.asyncio
     async def test_authenticate_login_failure(self, session_credentials):
         """Test authentication with login failure."""
         handler = SessionHandler(session_credentials)
         
-        # Mock failed login response
+        # Mock failed login response (no session token)
         login_response = MagicMock(spec=httpx.Response)
         login_response.raise_for_status.return_value = None
         login_response.json.return_value = {
-            "success": False,
             "message": "Invalid credentials"
+            # No sessionToken field
         }
         
         client = AsyncMock(spec=httpx.AsyncClient)
@@ -288,10 +291,17 @@ class TestSessionHandler:
         
         # Expired token
         handler._token_expires_at = time.time() - 3600  # 1 hour ago
+        handler._last_login = time.time() - 7200  # 2 hours ago
         assert handler._is_token_expired() is True
         
-        # Valid token
+        # Valid token but session older than 1 hour
         handler._token_expires_at = time.time() + 3600  # 1 hour from now
+        handler._last_login = time.time() - 3700  # >1 hour ago
+        assert handler._is_token_expired() is True
+        
+        # Valid token and recent session
+        handler._token_expires_at = time.time() + 3600  # 1 hour from now
+        handler._last_login = time.time() - 1800  # 30 minutes ago
         assert handler._is_token_expired() is False
     
     @pytest.mark.asyncio
@@ -305,10 +315,13 @@ class TestSessionHandler:
         
         await handler.logout(client)
         
-        # Verify logout request was made
+        # Verify logout request was made with correct headers
         client.post.assert_called_once_with(
-            "/auth/logout",
-            headers={"Authorization": "Bearer test_token"}
+            "/logout",
+            headers={
+                "X-Auth-Token": "test_token",
+                "Authorization": "DXAPI test_token"
+            }
         )
         
         # Verify token was cleared
@@ -329,6 +342,7 @@ class TestSessionHandler:
         
         # Token should still be cleared
         assert handler._session_token is None
+        assert handler._last_login is None
 
 
 class TestAuthFactory:
