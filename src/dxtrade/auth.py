@@ -10,6 +10,7 @@ from abc import abstractmethod
 from base64 import b64encode
 from typing import Any
 from typing import Dict
+from typing import List
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -197,6 +198,7 @@ class SessionHandler(AuthHandler):
         self._session_token: Optional[str] = None
         self._token_expires_at: Optional[float] = None
         self._last_login: Optional[float] = None
+        self.accounts: List[str] = []  # Store available accounts
 
     async def authenticate(
         self,
@@ -243,22 +245,26 @@ class SessionHandler(AuthHandler):
                 "domain": self.credentials.domain or "default",
             }
             
+            # Use /login endpoint as per the integration guide
             response = await client.post("/login", json=login_data)
             response.raise_for_status()
             
             data = response.json()
             
-            # Extract session token directly from response
+            # Get sessionToken from response (as per integration guide)
             self._session_token = data.get("sessionToken")
             
             if not self._session_token:
-                raise DXtradeAuthenticationError(
-                    data.get("message", "No session token in response")
-                )
+                error_msg = data.get("message") or "Login failed - no session token received"
+                raise DXtradeAuthenticationError(error_msg)
             
-            # Set token expiration (default to 1 hour as per example)
-            self._token_expires_at = time.time() + 3600 - 300  # 1 hour with 5 min buffer
+            # Store expiration time if provided, otherwise default to 1 hour
+            expires_in = data.get("expiresIn", 3600)
+            self._token_expires_at = time.time() + expires_in - 300  # With 5 min buffer
             self._last_login = time.time()
+            
+            # Store accounts for reference
+            self.accounts = data.get("accounts", [])
                 
         except httpx.HTTPError as e:
             raise DXtradeAuthenticationError(f"Login request failed: {e}") from e
@@ -285,6 +291,14 @@ class SessionHandler(AuthHandler):
             Session auth type
         """
         return AuthType.SESSION
+    
+    def get_session_token(self) -> Optional[str]:
+        """Get the current session token.
+        
+        Returns:
+            Session token if available
+        """
+        return self._session_token
 
     async def logout(self, client: httpx.AsyncClient) -> None:
         """Log out and invalidate the session token.
@@ -296,7 +310,7 @@ class SessionHandler(AuthHandler):
             return
         
         try:
-            # Try to invalidate token on server
+            # Try to invalidate token on server (as per integration guide)
             headers = {
                 "X-Auth-Token": self._session_token,
                 "Authorization": f"DXAPI {self._session_token}"
@@ -309,6 +323,7 @@ class SessionHandler(AuthHandler):
             self._session_token = None
             self._token_expires_at = None
             self._last_login = None
+            self.accounts = []
 
 
 class AuthFactory:

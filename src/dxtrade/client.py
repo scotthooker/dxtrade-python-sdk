@@ -1,395 +1,532 @@
-"""Main DXtrade client with unified interface."""
+"""DXTrade Python SDK - Main client implementation.
 
-from __future__ import annotations
+Production-ready SDK for DXTrade REST and WebSocket APIs with:
+- Comprehensive async/await patterns
+- Typed responses using Pydantic
+- Exponential backoff and retry logic
+- Rate limiting and idempotency
+- WebSocket state management
+- Automatic reconnection
+- Comprehensive error handling
+"""
 
-from typing import Optional
+import asyncio
+import logging
+from typing import Optional, Dict, Any
+from datetime import datetime
 
-from dxtrade.auth import AuthFactory
-from dxtrade.auth import AuthHandler
-from dxtrade.errors import DXtradeConfigurationError
-from dxtrade.http import DXtradeHTTPClient
-from dxtrade.models import AnyCredentials
-from dxtrade.models import AuthType
-from dxtrade.models import ClientConfig
-from dxtrade.models import HTTPConfig
-from dxtrade.models import WebSocketConfig
-from dxtrade.push import DXtradePushClient
-from dxtrade.rest import AccountsAPI
-from dxtrade.rest import InstrumentsAPI
-from dxtrade.rest import OrdersAPI
-from dxtrade.rest import PositionsAPI
+from .config import DXTradeConfig, SDKConfig
+from .transport import DXTradeTransport, create_transport
+from .rest.accounts import AccountsAPI
+from .rest.instruments import InstrumentsAPI
+from .rest.orders import OrdersAPI
+from .rest.positions import PositionsAPI
+from .websocket.stream_manager import DXTradeStreamManager
+from .websocket.unified_stream import UnifiedWebSocketStream
+from .errors import DXtradeError, ConfigError
+from .types.common import Environment, AuthConfig
+from .types.websocket import StreamOptions, StreamCallbacks
+from .types.dxtrade_messages import DXTradeStreamOptions, DXTradeStreamCallbacks
+
+logger = logging.getLogger(__name__)
 
 
-class DXtradeClient:
-    """Main DXtrade client with unified REST and WebSocket access."""
+class DXTradeClient:
+    """Main DXTrade SDK client.
+    
+    Provides access to REST APIs and WebSocket streams for DXTrade platform.
+    
+    Example:
+        ```python
+        from dxtrade import DXTradeClient
+        
+        # Create client with session authentication
+        client = DXTradeClient(
+            environment="demo",
+            auth={"type": "session", "token": "your-session-token"}
+        )
+        
+        # Connect to APIs
+        await client.connect()
+        
+        # Use REST APIs
+        accounts = await client.accounts.get_accounts()
+        positions = await client.positions.get_positions()
+        
+        # Start WebSocket stream
+        stream = await client.start_stream()
+        
+        # Subscribe to market data
+        await stream.subscribe_quotes(["EURUSD", "GBPUSD"])
+        
+        # Clean up
+        await client.disconnect()
+        ```
+    """
     
     def __init__(
         self,
-        config: Optional[ClientConfig] = None,
-        *,
-        # HTTP configuration
+        config: Optional[DXTradeConfig] = None,
+        environment: Optional[Environment] = None,
+        auth: Optional[AuthConfig] = None,
         base_url: Optional[str] = None,
-        timeout: float = 30.0,
-        max_retries: int = 3,
-        retry_backoff_factor: float = 0.3,
-        rate_limit: Optional[int] = None,
-        user_agent: str = "dxtrade-python-sdk/1.0.0",
-        # WebSocket configuration
-        websocket_url: Optional[str] = None,
-        websocket_max_retries: int = 5,
-        websocket_retry_backoff_factor: float = 0.5,
-        heartbeat_interval: float = 30.0,
-        max_message_size: int = 1024 * 1024,
-        ping_interval: Optional[float] = 20.0,
-        ping_timeout: Optional[float] = 10.0,
-        # Authentication
-        auth_type: Optional[AuthType] = None,
-        credentials: Optional[AnyCredentials] = None,
-        clock_drift_threshold: float = 30.0,
-        enable_idempotency: bool = True,
-    ) -> None:
-        """Initialize DXtrade client.
+        timeout: int = 30000,
+        retries: int = 3,
+        **kwargs
+    ):
+        """Initialize DXTrade client.
         
         Args:
-            config: Complete client configuration (overrides individual parameters)
+            config: Complete configuration object (takes precedence)
+            environment: Trading environment ("demo" or "live")
+            auth: Authentication configuration
             base_url: Base URL for REST API
-            timeout: Request timeout in seconds
-            max_retries: Maximum retry attempts
-            retry_backoff_factor: Retry backoff factor
-            rate_limit: Rate limit (requests per second)
-            user_agent: User agent string
-            websocket_url: WebSocket URL for Push API
-            websocket_max_retries: WebSocket max reconnection attempts
-            websocket_retry_backoff_factor: WebSocket reconnection backoff factor
-            heartbeat_interval: WebSocket heartbeat interval in seconds
-            max_message_size: Maximum WebSocket message size
-            ping_interval: WebSocket ping interval in seconds
-            ping_timeout: WebSocket ping timeout in seconds
-            auth_type: Authentication type
-            credentials: Authentication credentials
-            clock_drift_threshold: Clock drift threshold in seconds
-            enable_idempotency: Enable idempotency keys
-            
-        Raises:
-            DXtradeConfigurationError: Invalid configuration
+            timeout: Request timeout in milliseconds
+            retries: Number of retry attempts
+            **kwargs: Additional configuration options
         """
-        # Build configuration if not provided
-        if config is None:
-            if not base_url:
-                raise DXtradeConfigurationError("base_url is required")
-            if not auth_type or not credentials:
-                raise DXtradeConfigurationError("auth_type and credentials are required")
+        # Build configuration
+        if config:
+            self.config = config
+        else:
+            if not auth:
+                raise ConfigError("Authentication configuration is required")
             
-            http_config = HTTPConfig(
-                base_url=base_url,
+            self.config = DXTradeConfig(
+                environment=environment or "demo",
+                auth=auth,
+                base_url=base_url or self._get_default_base_url(environment or "demo"),
                 timeout=timeout,
-                max_retries=max_retries,
-                retry_backoff_factor=retry_backoff_factor,
-                rate_limit=rate_limit,
-                user_agent=user_agent,
+                retries=retries,
+                **kwargs
             )
-            
-            websocket_config = None
-            if websocket_url:
-                websocket_config = WebSocketConfig(
-                    url=websocket_url,
-                    max_retries=websocket_max_retries,
-                    retry_backoff_factor=websocket_retry_backoff_factor,
-                    heartbeat_interval=heartbeat_interval,
-                    max_message_size=max_message_size,
-                    ping_interval=ping_interval,
-                    ping_timeout=ping_timeout,
-                )
-            
-            config = ClientConfig(
-                http=http_config,
-                websocket=websocket_config,
-                auth_type=auth_type,
-                credentials=credentials,
-                clock_drift_threshold=clock_drift_threshold,
-                enable_idempotency=enable_idempotency,
-            )
-        
-        self.config = config
-        
-        # Create authentication handler
-        self._auth_handler = AuthFactory.create_handler(
-            config.auth_type,
-            config.credentials,
-        )
         
         # Initialize HTTP client
-        self._http_client = DXtradeHTTPClient(
-            config=config.http,
-            auth_handler=self._auth_handler,
-        )
+        self.http = HttpClient(self.config)
         
-        # Initialize REST API endpoints
-        self.accounts = AccountsAPI(self._http_client)
-        self.instruments = InstrumentsAPI(self._http_client)
-        self.orders = OrdersAPI(self._http_client)
-        self.positions = PositionsAPI(self._http_client)
+        # Initialize REST API modules
+        self.accounts = AccountsAPI(self.http)
+        self.instruments = InstrumentsAPI(self.http)
+        self.orders = OrdersAPI(self.http)
+        self.positions = PositionsAPI(self.http)
         
-        # Initialize WebSocket client (lazy)
-        self._push_client: Optional[DXtradePushClient] = None
+        # WebSocket manager (initialized on demand)
+        self._stream_manager: Optional[DXTradeStreamManager] = None
+        self._unified_stream: Optional[UnifiedWebSocketStream] = None
+        
+        # Connection state
+        self._connected = False
+        self._session_token: Optional[str] = None
     
-    @property
-    def push(self) -> DXtradePushClient:
-        """Get WebSocket push client.
+    async def connect(self) -> None:
+        """Connect to DXTrade APIs.
+        
+        Establishes connection and performs authentication if needed.
+        """
+        try:
+            # For session-based auth, the token is already configured
+            if self.config.auth["type"] == "session":
+                self._session_token = self.config.auth.get("token")
+            
+            # For credentials-based auth, perform login
+            elif self.config.auth["type"] == "credentials":
+                await self._authenticate()
+            
+            self._connected = True
+            logger.info("Successfully connected to DXTrade APIs")
+            
+        except Exception as e:
+            logger.error(f"Failed to connect: {e}")
+            raise
+    
+    async def disconnect(self) -> None:
+        """Disconnect from DXTrade APIs.
+        
+        Closes WebSocket connections and cleans up resources.
+        """
+        try:
+            # Close WebSocket streams
+            if self._stream_manager:
+                await self._stream_manager.disconnect()
+                self._stream_manager = None
+            
+            if self._unified_stream:
+                await self._unified_stream.close()
+                self._unified_stream = None
+            
+            self._connected = False
+            logger.info("Disconnected from DXTrade APIs")
+            
+        except Exception as e:
+            logger.error(f"Error during disconnect: {e}")
+            raise
+    
+    def is_ready(self) -> bool:
+        """Check if client is ready for trading.
         
         Returns:
-            Push API client
-            
-        Raises:
-            DXtradeConfigurationError: WebSocket not configured
+            True if client is connected and authenticated
         """
-        if self._push_client is None:
-            if not self.config.websocket:
-                raise DXtradeConfigurationError(
-                    "WebSocket URL not configured. "
-                    "Set websocket_url parameter or websocket config."
-                )
-            
-            self._push_client = DXtradePushClient(
-                config=self.config.websocket,
-                auth_handler=self._auth_handler,
-            )
+        return self._connected and (self._session_token is not None or 
+                                   self.config.auth["type"] != "credentials")
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get comprehensive client status.
         
-        return self._push_client
+        Returns:
+            Dictionary with status information for all components
+        """
+        status = {
+            "http": {
+                "rate_limit_status": self.http.get_rate_limit_status(),
+                "stats": self.http.get_stats()
+            },
+            "ready": self.is_ready(),
+            "connected": self._connected
+        }
+        
+        if self._stream_manager:
+            status["websocket"] = self._stream_manager.get_status()
+        
+        return status
     
-    @property
-    def auth_handler(self) -> AuthHandler:
-        """Get authentication handler."""
-        return self._auth_handler
+    def create_stream(
+        self,
+        options: Optional[DXTradeStreamOptions] = None,
+        callbacks: Optional[DXTradeStreamCallbacks] = None
+    ) -> DXTradeStreamManager:
+        """Create DXTrade WebSocket stream manager.
+        
+        This is the recommended way to manage DXTrade WebSocket connections.
+        
+        Args:
+            options: Stream configuration options
+            callbacks: Event callback handlers
+            
+        Returns:
+            DXTradeStreamManager instance
+            
+        Example:
+            ```python
+            stream = client.create_stream(
+                options={"subscribe_quotes": ["EURUSD", "GBPUSD"]},
+                callbacks={
+                    "on_quote": lambda quote: print(f"Quote: {quote}"),
+                    "on_error": lambda error: print(f"Error: {error}")
+                }
+            )
+            await stream.connect()
+            ```
+        """
+        if not self._session_token and self.config.auth["type"] == "session":
+            self._session_token = self.config.auth.get("token")
+        
+        if not self._session_token:
+            raise ConfigError("Session token not available. Ensure client is authenticated first.")
+        
+        self._stream_manager = DXTradeStreamManager(
+            config=self.config,
+            session_token=self._session_token,
+            options=options or {},
+            callbacks=callbacks or {}
+        )
+        
+        return self._stream_manager
     
-    async def __aenter__(self) -> DXtradeClient:
-        """Async context manager entry."""
+    async def start_stream(
+        self,
+        options: Optional[DXTradeStreamOptions] = None,
+        callbacks: Optional[DXTradeStreamCallbacks] = None
+    ) -> DXTradeStreamManager:
+        """Start DXTrade WebSocket stream and connect immediately.
+        
+        Convenience method that creates and connects the stream manager.
+        
+        Args:
+            options: Stream configuration options
+            callbacks: Event callback handlers
+            
+        Returns:
+            Connected DXTradeStreamManager instance
+            
+        Example:
+            ```python
+            stream = await client.start_stream(
+                options={"subscribe_quotes": ["EURUSD"]},
+                callbacks={"on_quote": print}
+            )
+            ```
+        """
+        stream = self.create_stream(options, callbacks)
+        connected = await stream.connect()
+        
+        if not connected:
+            raise DXtradeError("Failed to connect to DXTrade WebSocket streams")
+        
+        return stream
+    
+    def create_unified_stream(
+        self,
+        options: Optional[StreamOptions] = None,
+        callbacks: Optional[StreamCallbacks] = None
+    ) -> UnifiedWebSocketStream:
+        """Create unified WebSocket stream for real-time data.
+        
+        Provides dual WebSocket connections (market data + portfolio).
+        
+        Args:
+            options: Stream configuration options
+            callbacks: Event callback handlers
+            
+        Returns:
+            UnifiedWebSocketStream instance
+        """
+        if not self._session_token and self.config.auth["type"] == "session":
+            self._session_token = self.config.auth.get("token")
+        
+        if not self._session_token:
+            raise ConfigError("Session token not available. Ensure client is authenticated first.")
+        
+        self._unified_stream = UnifiedWebSocketStream(
+            config=self.config,
+            session_token=self._session_token,
+            options=options or {},
+            callbacks=callbacks or {}
+        )
+        
+        return self._unified_stream
+    
+    async def start_unified_stream(
+        self,
+        options: Optional[StreamOptions] = None,
+        callbacks: Optional[StreamCallbacks] = None
+    ) -> UnifiedWebSocketStream:
+        """Start unified WebSocket stream (Python compatibility helper).
+        
+        Returns the same structure as TypeScript version for compatibility.
+        
+        Args:
+            options: Stream configuration options
+            callbacks: Event callback handlers
+            
+        Returns:
+            Connected UnifiedWebSocketStream instance
+        """
+        stream = self.create_unified_stream(options, callbacks)
+        await stream.connect()
+        return stream
+    
+    async def run_stream_test(
+        self,
+        duration_ms: int = 300000,  # 5 minutes default
+        options: Optional[DXTradeStreamOptions] = None,
+        callbacks: Optional[DXTradeStreamCallbacks] = None
+    ) -> Dict[str, Any]:
+        """Run a DXTrade WebSocket stability test.
+        
+        Useful for validating connection stability and ping/pong handling.
+        
+        Args:
+            duration_ms: Test duration in milliseconds
+            options: Stream configuration options
+            callbacks: Event callback handlers
+            
+        Returns:
+            Test results with statistics
+        """
+        stream = self.create_stream(options, callbacks)
+        return await stream.run_stability_test(duration_ms)
+    
+    def set_session_token(self, token: str) -> None:
+        """Update authentication token for session-based auth.
+        
+        Args:
+            token: New session token
+        """
+        self._session_token = token
+        self.http.set_session_token(token)
+        
+        # Update config if using session auth
+        if self.config.auth["type"] == "session":
+            self.config.auth["token"] = token
+    
+    def clear_session_token(self) -> None:
+        """Clear session token."""
+        self._session_token = None
+        self.http.clear_session_token()
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """Perform health check on all services.
+        
+        Returns:
+            Dictionary with health status for each component
+        """
+        results = {
+            "http": {"healthy": False},
+            "overall": False
+        }
+        
+        # Test HTTP client
+        try:
+            start = datetime.now()
+            # Try a simple endpoint
+            await self.http.get("/health")
+            latency = (datetime.now() - start).total_seconds() * 1000
+            results["http"] = {
+                "healthy": True,
+                "latency": latency
+            }
+        except Exception as e:
+            results["http"] = {
+                "healthy": False,
+                "error": str(e)
+            }
+        
+        # Test WebSocket if available
+        if self._stream_manager:
+            try:
+                ws_status = self._stream_manager.get_status()
+                results["websocket"] = {
+                    "healthy": ws_status.get("connected", False),
+                    "connected": ws_status.get("connected", False),
+                    "authenticated": ws_status.get("authenticated", False)
+                }
+            except Exception as e:
+                results["websocket"] = {
+                    "healthy": False,
+                    "connected": False,
+                    "authenticated": False,
+                    "error": str(e)
+                }
+        
+        # Overall health
+        results["overall"] = results["http"]["healthy"] and \
+                           results.get("websocket", {}).get("healthy", True)
+        
+        return results
+    
+    async def _authenticate(self) -> None:
+        """Perform authentication for credentials-based auth."""
+        if self.config.auth["type"] != "credentials":
+            return
+        
+        # Perform login
+        auth_data = self.config.auth
+        response = await self.http.post("/login", {
+            "username": auth_data["username"],
+            "password": auth_data["password"],
+            "domain": auth_data.get("domain", "default")
+        })
+        
+        if response.get("sessionToken"):
+            self._session_token = response["sessionToken"]
+            self.http.set_session_token(self._session_token)
+        else:
+            raise DXtradeError("Authentication failed: no session token received")
+    
+    def _get_default_base_url(self, environment: Environment) -> str:
+        """Get default base URL for environment.
+        
+        Args:
+            environment: Trading environment
+            
+        Returns:
+            Default base URL
+        """
+        if environment == "demo":
+            return "https://demo-api.dx.trade/api/v1"
+        else:
+            return "https://api.dx.trade/api/v1"
+    
+    def __enter__(self):
+        """Context manager entry."""
         return self
     
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        if self._stream_manager:
+            asyncio.create_task(self._stream_manager.disconnect())
+        if self._unified_stream:
+            asyncio.create_task(self._unified_stream.close())
+    
+    async def __aenter__(self):
+        """Async context manager entry."""
+        await self.connect()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
-        await self.close()
-    
-    async def close(self) -> None:
-        """Close all client connections."""
-        # Close HTTP client
-        if self._http_client:
-            await self._http_client.close()
-        
-        # Close WebSocket client if initialized
-        if self._push_client:
-            await self._push_client.disconnect()
-    
-    # Convenience methods for common operations
-    
-    async def login(self) -> bool:
-        """Perform login for session-based authentication.
-        
-        This is automatically called when needed for session auth,
-        but can be called manually to pre-authenticate.
-        
-        Returns:
-            True if login successful
-            
-        Raises:
-            DXtradeAuthenticationError: Login failed
-        """
-        from dxtrade.auth import SessionHandler
-        
-        if isinstance(self._auth_handler, SessionHandler):
-            # Force refresh of session token
-            await self._auth_handler._refresh_session_token(self._http_client._client)
-            return True
-        return False
-    
-    async def logout(self) -> None:
-        """Perform logout for session-based authentication."""
-        from dxtrade.auth import SessionHandler
-        
-        if isinstance(self._auth_handler, SessionHandler):
-            await self._auth_handler.logout(self._http_client._client)
-    
-    async def get_server_time(self):
-        """Get server time (convenience method)."""
-        return await self.instruments.get_server_time()
-    
-    async def get_account_summary(self, account_id: str):
-        """Get account summary (convenience method)."""
-        return await self.accounts.get_account_summary(account_id)
-    
-    async def get_current_prices(self, symbols: Optional[list[str]] = None):
-        """Get current prices (convenience method)."""
-        return await self.instruments.get_prices(symbols)
-    
-    async def create_market_order(
-        self,
-        symbol: str,
-        side: str,
-        volume: float,
-        account_id: Optional[str] = None,
-        **kwargs,
-    ):
-        """Create market order (convenience method)."""
-        from dxtrade.models import OrderRequest, OrderSide, OrderType
-        
-        order = OrderRequest(
-            symbol=symbol,
-            side=OrderSide(side),
-            type=OrderType.MARKET,
-            volume=volume,
-            **kwargs,
-        )
-        return await self.orders.create_order(order)
-    
-    async def create_limit_order(
-        self,
-        symbol: str,
-        side: str,
-        volume: float,
-        price: float,
-        **kwargs,
-    ):
-        """Create limit order (convenience method)."""
-        from dxtrade.models import OrderRequest, OrderSide, OrderType
-        
-        order = OrderRequest(
-            symbol=symbol,
-            side=OrderSide(side),
-            type=OrderType.LIMIT,
-            volume=volume,
-            price=price,
-            **kwargs,
-        )
-        return await self.orders.create_order(order)
-    
-    async def get_open_orders(self, account_id: Optional[str] = None):
-        """Get open orders (convenience method)."""
-        from dxtrade.models import OrderStatus
-        
-        return await self.orders.get_orders(
-            account_id=account_id,
-            status=OrderStatus.OPEN,
-        )
-    
-    async def get_open_positions(self, account_id: Optional[str] = None):
-        """Get open positions (convenience method)."""
-        return await self.positions.get_positions(account_id=account_id)
-    
-    async def close_all_positions(self, account_id: str):
-        """Close all positions (convenience method)."""
-        return await self.positions.close_all_positions(account_id)
-    
-    # Static factory methods
-    
-    @classmethod
-    def create_with_bearer_token(
-        cls,
-        base_url: str,
-        token: str,
-        *,
-        websocket_url: Optional[str] = None,
-        **kwargs,
-    ) -> DXtradeClient:
-        """Create client with bearer token authentication.
-        
-        Args:
-            base_url: Base URL for REST API
-            token: Bearer token
-            websocket_url: Optional WebSocket URL
-            **kwargs: Additional configuration parameters
-            
-        Returns:
-            Configured DXtrade client
-        """
-        from dxtrade.models import BearerTokenCredentials
-        
-        credentials = BearerTokenCredentials(token=token)
-        
-        return cls(
-            base_url=base_url,
-            websocket_url=websocket_url,
-            auth_type=AuthType.BEARER_TOKEN,
-            credentials=credentials,
-            **kwargs,
-        )
-    
-    @classmethod
-    def create_with_hmac(
-        cls,
-        base_url: str,
-        api_key: str,
-        secret_key: str,
-        *,
-        passphrase: Optional[str] = None,
-        websocket_url: Optional[str] = None,
-        **kwargs,
-    ) -> DXtradeClient:
-        """Create client with HMAC authentication.
-        
-        Args:
-            base_url: Base URL for REST API
-            api_key: API key
-            secret_key: Secret key
-            passphrase: Optional passphrase
-            websocket_url: Optional WebSocket URL
-            **kwargs: Additional configuration parameters
-            
-        Returns:
-            Configured DXtrade client
-        """
-        from dxtrade.models import HMACCredentials
-        
-        credentials = HMACCredentials(
-            api_key=api_key,
-            secret_key=secret_key,
-            passphrase=passphrase,
-        )
-        
-        return cls(
-            base_url=base_url,
-            websocket_url=websocket_url,
-            auth_type=AuthType.HMAC,
-            credentials=credentials,
-            **kwargs,
-        )
-    
-    @classmethod
-    def create_with_session(
-        cls,
-        base_url: str,
-        username: str,
-        password: str,
-        *,
-        websocket_url: Optional[str] = None,
-        **kwargs,
-    ) -> DXtradeClient:
-        """Create client with session authentication.
-        
-        Args:
-            base_url: Base URL for REST API
-            username: Username
-            password: Password
-            websocket_url: Optional WebSocket URL
-            **kwargs: Additional configuration parameters
-            
-        Returns:
-            Configured DXtrade client
-        """
-        from dxtrade.models import SessionCredentials
-        
-        credentials = SessionCredentials(
-            username=username,
-            password=password,
-        )
-        
-        return cls(
-            base_url=base_url,
-            websocket_url=websocket_url,
-            auth_type=AuthType.SESSION,
-            credentials=credentials,
-            **kwargs,
-        )
+        await self.disconnect()
 
 
-# Convenience aliases for easy imports
-DXClient = DXtradeClient  # Short alias
+def create_client(
+    environment: Environment = "demo",
+    auth: Optional[AuthConfig] = None,
+    **kwargs
+) -> DXTradeClient:
+    """Factory function to create DXTrade client.
+    
+    Args:
+        environment: Trading environment ("demo" or "live")
+        auth: Authentication configuration
+        **kwargs: Additional configuration options
+        
+    Returns:
+        DXTradeClient instance
+        
+    Example:
+        ```python
+        from dxtrade import create_client
+        
+        client = create_client(
+            environment="demo",
+            auth={"type": "session", "token": "your-token"}
+        )
+        ```
+    """
+    return DXTradeClient(environment=environment, auth=auth, **kwargs)
+
+
+def create_demo_client(auth: AuthConfig, **kwargs) -> DXTradeClient:
+    """Create demo client with sensible defaults.
+    
+    Args:
+        auth: Authentication configuration
+        **kwargs: Additional configuration options
+        
+    Returns:
+        DXTradeClient instance configured for demo environment
+    """
+    return create_client(environment="demo", auth=auth, **kwargs)
+
+
+def create_live_client(auth: AuthConfig, **kwargs) -> DXTradeClient:
+    """Create live client with sensible defaults.
+    
+    Args:
+        auth: Authentication configuration
+        **kwargs: Additional configuration options
+        
+    Returns:
+        DXTradeClient instance configured for live environment
+    """
+    return create_client(environment="live", auth=auth, **kwargs)
+
+
+def create_rest_only_client(
+    environment: Environment = "demo",
+    auth: Optional[AuthConfig] = None,
+    **kwargs
+) -> DXTradeClient:
+    """Create REST-only client (no WebSocket).
+    
+    Args:
+        environment: Trading environment
+        auth: Authentication configuration
+        **kwargs: Additional configuration options
+        
+    Returns:
+        DXTradeClient instance without WebSocket support
+    """
+    kwargs["enable_websocket"] = False
+    return create_client(environment=environment, auth=auth, **kwargs)

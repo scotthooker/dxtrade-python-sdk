@@ -1,452 +1,601 @@
-# DXtrade Python SDK
+# DXTrade Python SDK
 
+[![Python Version](https://img.shields.io/pypi/pyversions/dxtrade-sdk)](https://pypi.org/project/dxtrade-sdk/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Production-ready Python SDK for DXtrade's REST and WebSocket APIs with asyncio-first design.
+A Python SDK for the DXTrade trading platform, providing both high-level client functionality and low-level transport layer for building bridges and middleware.
 
-## ✨ Features
+## Table of Contents
 
-- **🚀 Asyncio-first design** - Built for high-performance async applications
-- **🔐 Multiple auth methods** - Bearer token, HMAC, and session authentication
-- **🔄 Auto-reconnecting WebSocket** - Reliable real-time data streaming with backoff
-- **⚡ Smart retry logic** - Exponential backoff with full jitter
-- **🛡️ Rate limiting** - Built-in rate limiting with Retry-After support
-- **🔑 Idempotency keys** - Automatic idempotency for safe retries
-- **⏰ Clock drift detection** - Automatic server time synchronization
-- **📊 Comprehensive models** - Fully typed Pydantic models for all API entities
-- **🧪 Extensive testing** - 90%+ test coverage with integration tests
-- **📖 Rich documentation** - Comprehensive examples and API reference
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Usage Examples](#usage-examples)
+- [Transport Layer for Bridges](#transport-layer-for-bridges)
+- [API Reference](#api-reference)
+- [Broker Configuration](#broker-configuration)
+- [WebSocket Features](#websocket-features)
+- [Error Handling](#error-handling)
+- [Development](#development)
+- [PyPI Publishing](#pypi-publishing)
+- [Changelog](#changelog)
+- [Support](#support)
+- [License](#license)
 
-## 📦 Installation
+## Features
+
+### Core Features
+- 🔐 **Session token authentication** with automatic renewal
+- 📊 **Real-time market data streaming** via WebSocket
+- 📈 **Portfolio updates** and position tracking
+- 🔄 **Automatic ping/pong session management**
+- 🌉 **Transport layer** for building bridges (RabbitMQ, Kafka, Redis)
+- ⚡ **Async/await support** with modern Python
+- 🛡️ **Robust error handling** and reconnection logic
+- 🔧 **Environment-based configuration**
+
+### WebSocket Features
+- Real-time market quotes streaming
+- Portfolio and position updates
+- Order status updates
+- Automatic session extension via ping/pong
+- 4-tier connection fallback system for compatibility
+- Multi-channel support for different data streams
+
+### Transport Layer
+- Minimal overhead (~200 lines vs 2000+ for full SDK)
+- Raw data passthrough for maximum flexibility
+- Direct WebSocket forwarding to message brokers
+- Session token reuse across connections
+- Perfect for building bridges to RabbitMQ, Kafka, Redis, etc.
+
+## Installation
 
 ```bash
-pip install dxtrade
+pip install dxtrade-sdk
 ```
 
-For development features:
-```bash
-pip install "dxtrade[dev]"
-```
+### Requirements
+- Python 3.10+
+- aiohttp>=3.8.0
+- websockets>=12.0
+- python-dotenv>=1.0.0
 
-## 🚀 Quick Start
+## Quick Start
 
-### Basic REST API Usage
+### Stream Market Data
 
 ```python
 import asyncio
-from dxtrade import DXtradeClient
+import os
+from dxtrade import create_transport
 
 async def main():
-    # Create client with bearer token
-    client = DXtradeClient.create_with_bearer_token(
-        base_url="https://api.dxtrade.com",
-        token="your_bearer_token_here"
-    )
+    transport = create_transport()
     
-    async with client:
-        # Get server time
-        server_time = await client.get_server_time()
-        print(f"Server time: {server_time.timestamp}")
+    def handle_quote(msg):
+        if msg.get('type') == 'MarketData':
+            events = msg.get('payload', {}).get('events', [])
+            for event in events:
+                symbol = event.get('symbol')
+                bid = event.get('bid')
+                ask = event.get('ask')
+                print(f"📈 {symbol}: Bid={bid} Ask={ask}")
+    
+    async with transport:
+        # Authenticate
+        await transport.authenticate()
+        print("✅ Authenticated")
         
-        # Get accounts
-        accounts = await client.accounts.get_accounts()
-        print(f"Found {len(accounts)} accounts")
+        # Connect to market data WebSocket
+        ws_url = os.getenv('DXTRADE_WS_MARKET_DATA_URL', 
+                          'wss://your-broker.com/dxsca-web/md?format=JSON')
+        await transport.subscribe("quotes", handle_quote, ws_url)
+        print("✅ Connected to market data")
         
-        # Get current prices
-        prices = await client.get_current_prices(["EURUSD", "GBPUSD"])
-        for price in prices:
-            print(f"{price.symbol}: {price.bid}/{price.ask}")
-        
-        # Create a market order
-        order = await client.create_market_order(
-            symbol="EURUSD",
-            side="buy", 
-            volume=0.01
+        # Subscribe to symbols
+        account = os.getenv('DXTRADE_ACCOUNT', 'your-account')
+        await transport.send_market_data_subscription(
+            symbols=["EUR/USD", "GBP/USD", "USD/JPY", "XAU/USD"],
+            account=account
         )
-        print(f"Created order: {order.order_id}")
+        print("📡 Subscribed to symbols")
+        
+        # Stream for 60 seconds
+        await asyncio.sleep(60)
 
 asyncio.run(main())
 ```
 
-### WebSocket Streaming
+## Configuration
+
+### Environment Variables
+
+Create a `.env` file in your project root:
+
+```env
+# ============================================================================
+# REQUIRED: Authentication
+# ============================================================================
+DXTRADE_USERNAME=your_username
+DXTRADE_PASSWORD=your_password
+
+# ============================================================================
+# REQUIRED: Server URLs
+# ============================================================================
+# Base URL for REST API
+DXTRADE_BASE_URL=https://your-broker.com/dxsca-web
+
+# WebSocket URL for market data streaming
+DXTRADE_WS_MARKET_DATA_URL=wss://your-broker.com/dxsca-web/md?format=JSON
+
+# WebSocket URL for portfolio/account updates
+DXTRADE_WS_PORTFOLIO_URL=wss://your-broker.com/dxsca-web/ws?format=JSON
+
+# ============================================================================
+# OPTIONAL: Account Configuration
+# ============================================================================
+# Your DXTrade account identifier (e.g., "default:demo", "main:live")
+DXTRADE_ACCOUNT=default:demo
+
+# Account name suffix if not providing full account ID
+DXTRADE_ACCOUNT_NAME=demo
+
+# Domain prefix for account (defaults to "default")
+DXTRADE_DOMAIN=default
+
+# ============================================================================
+# OPTIONAL: Connection Settings
+# ============================================================================
+# Request timeout in seconds (default: 30)
+DXTRADE_TIMEOUT=30
+
+# WebSocket ping interval in seconds (default: 45)
+DXTRADE_WS_PING_INTERVAL=45
+
+# ============================================================================
+# OPTIONAL: Logging
+# ============================================================================
+# Log level (DEBUG, INFO, WARNING, ERROR)
+DXTRADE_LOG_LEVEL=INFO
+```
+
+### Example Configurations
+
+#### Demo Account
+```env
+DXTRADE_USERNAME=demo_user
+DXTRADE_PASSWORD=demo_password
+DXTRADE_BASE_URL=https://demo.your-broker.com/dxsca-web
+DXTRADE_WS_MARKET_DATA_URL=wss://demo.your-broker.com/dxsca-web/md?format=JSON
+DXTRADE_WS_PORTFOLIO_URL=wss://demo.your-broker.com/dxsca-web/ws?format=JSON
+DXTRADE_ACCOUNT=default:demo
+```
+
+#### Live Account
+```env
+DXTRADE_USERNAME=live_user
+DXTRADE_PASSWORD=live_password
+DXTRADE_BASE_URL=https://trading.your-broker.com/dxsca-web
+DXTRADE_WS_MARKET_DATA_URL=wss://trading.your-broker.com/dxsca-web/md?format=JSON
+DXTRADE_WS_PORTFOLIO_URL=wss://trading.your-broker.com/dxsca-web/ws?format=JSON
+DXTRADE_ACCOUNT=main:live
+```
+
+## Usage Examples
+
+### Stream Market Data
+
+See the [examples/stream_market_data.py](examples/stream_market_data.py) for a complete example.
+
+### Build a Bridge to Message Queue
 
 ```python
 import asyncio
-from dxtrade import DXtradeClient
-from dxtrade.models import EventType, PriceEvent
+import os
+from dxtrade import create_transport
 
-async def main():
-    client = DXtradeClient.create_with_bearer_token(
-        base_url="https://api.dxtrade.com",
-        token="your_bearer_token_here",
-        websocket_url="wss://push.dxtrade.com/v1/stream"
-    )
+class DXTradeBridge:
+    """Bridge DXTrade data to your message queue."""
     
-    async with client:
-        # Connect to WebSocket
-        await client.push.connect()
+    def __init__(self):
+        self.transport = create_transport()
+    
+    async def forward_to_queue(self, message, channel):
+        """Forward message to your message queue."""
+        # Example: RabbitMQ
+        # await rabbitmq_channel.publish(
+        #     exchange='dxtrade',
+        #     routing_key=channel,
+        #     body=json.dumps(message)
+        # )
         
-        # Subscribe to price updates
-        subscription_id = await client.push.subscribe_prices(["EURUSD", "GBPUSD"])
+        # Example: Kafka
+        # await kafka_producer.send(f'dxtrade.{channel}', message)
         
-        # Handle price events
-        def on_price_update(event: PriceEvent):
-            price = event.data
-            print(f"{price.symbol}: {price.bid}/{price.ask}")
+        # Example: Redis
+        # await redis_client.publish(f'dxtrade:{channel}', json.dumps(message))
         
-        client.push.on(EventType.PRICE, on_price_update)
-        
-        # Stream for 30 seconds
-        await asyncio.sleep(30)
-
-asyncio.run(main())
-```
-
-## 🔐 Authentication Methods
-
-### Bearer Token
-```python
-client = DXtradeClient.create_with_bearer_token(
-    base_url="https://api.dxtrade.com",
-    token="your_bearer_token"
-)
-```
-
-### HMAC Authentication
-```python
-client = DXtradeClient.create_with_hmac(
-    base_url="https://api.dxtrade.com",
-    api_key="your_api_key",
-    secret_key="your_secret_key",
-    passphrase="your_passphrase"  # Optional
-)
-```
-
-### Session Authentication
-```python
-client = DXtradeClient.create_with_session(
-    base_url="https://api.dxtrade.com", 
-    username="your_username",
-    password="your_password"
-)
-```
-
-## 📈 Trading Operations
-
-### Market Orders
-```python
-# Market buy order
-order = await client.create_market_order(
-    symbol="EURUSD",
-    side="buy",
-    volume=0.1,
-    stop_loss=1.0800,  # Optional
-    take_profit=1.0900  # Optional
-)
-```
-
-### Limit Orders
-```python
-# Limit sell order
-order = await client.create_limit_order(
-    symbol="EURUSD", 
-    side="sell",
-    volume=0.1,
-    price=1.0850,
-    time_in_force="gtc"
-)
-```
-
-### Advanced Order Types
-```python
-from dxtrade.models import OCOOrderRequest, BracketOrderRequest
-
-# One-Cancels-Other order
-oco = OCOOrderRequest(
-    symbol="EURUSD",
-    side="buy",
-    volume=0.1,
-    price=1.0850,      # Limit price
-    stop_price=1.0800  # Stop price
-)
-orders = await client.orders.create_oco_order(oco)
-
-# Bracket order (Entry + Stop Loss + Take Profit)
-bracket = BracketOrderRequest(
-    symbol="EURUSD",
-    side="buy", 
-    volume=0.1,
-    price=1.0825,       # Entry
-    stop_loss=1.0800,   # Stop loss
-    take_profit=1.0900  # Take profit
-)
-orders = await client.orders.create_bracket_order(bracket)
-```
-
-## 📊 Market Data
-
-### Real-time Prices
-```python
-# Get current prices
-price = await client.instruments.get_price("EURUSD")
-print(f"EURUSD: {price.bid}/{price.ask}")
-
-# Get multiple prices
-prices = await client.instruments.get_prices(["EURUSD", "GBPUSD", "USDJPY"])
-```
-
-### Historical Data
-```python
-from datetime import datetime, timedelta
-
-# Get candle data
-end_time = datetime.utcnow()
-start_time = end_time - timedelta(hours=24)
-
-candles = await client.instruments.get_candles(
-    symbol="EURUSD",
-    interval="1h", 
-    start=start_time,
-    end=end_time,
-    limit=24
-)
-
-# Get tick data
-ticks = await client.instruments.get_ticks(
-    symbol="EURUSD",
-    limit=1000
-)
-```
-
-### Instrument Information
-```python
-# Get all instruments
-instruments = await client.instruments.get_instruments(
-    instrument_type="forex",
-    enabled_only=True
-)
-
-# Get specific instrument
-eurusd = await client.instruments.get_instrument("EURUSD")
-print(f"Min volume: {eurusd.min_volume}")
-print(f"Tick size: {eurusd.tick_size}")
-```
-
-## 🔄 WebSocket Streaming
-
-### Price Streaming
-```python
-# Subscribe to specific symbols
-price_sub = await client.push.subscribe_prices(["EURUSD", "GBPUSD"])
-
-# Subscribe to all prices
-all_prices_sub = await client.push.subscribe_prices()
-
-# Handle events
-def on_price(event: PriceEvent):
-    price = event.data
-    print(f"{price.symbol}: {price.bid}/{price.ask}")
-
-client.push.on(EventType.PRICE, on_price)
-```
-
-### Account Monitoring
-```python
-# Subscribe to account updates
-account_sub = await client.push.subscribe_account("account_id")
-order_sub = await client.push.subscribe_orders("account_id") 
-position_sub = await client.push.subscribe_positions("account_id")
-
-# Handle different event types
-client.push.on(EventType.ACCOUNT, handle_account_update)
-client.push.on(EventType.ORDER, handle_order_update)
-client.push.on(EventType.POSITION, handle_position_update)
-```
-
-### Event Iterator
-```python
-# Process events with async iterator
-async for event in client.push.events():
-    if event.type == EventType.PRICE:
-        handle_price(event.data)
-    elif event.type == EventType.ORDER:
-        handle_order(event.data)
-```
-
-## ⚙️ Configuration
-
-### HTTP Configuration
-```python
-from dxtrade.models import ClientConfig, HTTPConfig, BearerTokenCredentials, AuthType
-
-config = ClientConfig(
-    http=HTTPConfig(
-        base_url="https://api.dxtrade.com",
-        timeout=60.0,
-        max_retries=5,
-        retry_backoff_factor=0.5,
-        rate_limit=20,  # requests per second
-        user_agent="MyApp/1.0.0"
-    ),
-    auth_type=AuthType.BEARER_TOKEN,
-    credentials=BearerTokenCredentials(token="your_token"),
-    clock_drift_threshold=30.0,
-    enable_idempotency=True
-)
-
-client = DXtradeClient(config=config)
-```
-
-### WebSocket Configuration
-```python
-client = DXtradeClient(
-    base_url="https://api.dxtrade.com",
-    websocket_url="wss://push.dxtrade.com/v1/stream",
-    auth_type=AuthType.BEARER_TOKEN,
-    credentials=credentials,
-    # WebSocket specific settings
-    websocket_max_retries=10,
-    websocket_retry_backoff_factor=1.0,
-    heartbeat_interval=30.0,
-    max_message_size=1024*1024
-)
-```
-
-## 🛡️ Error Handling
-
-```python
-from dxtrade.errors import (
-    DXtradeError, DXtradeHTTPError, DXtradeRateLimitError,
-    DXtradeTimeoutError, DXtradeAuthenticationError
-)
-
-try:
-    order = await client.create_market_order("EURUSD", "buy", 0.1)
+        print(f"📤 Forward to {channel}: {message.get('type')}")
     
-except DXtradeAuthenticationError as e:
-    print(f"Auth failed: {e}")
-    
-except DXtradeRateLimitError as e:
-    print(f"Rate limited, retry after {e.retry_after}s")
-    
-except DXtradeTimeoutError as e:
-    print(f"Request timeout: {e.timeout}s")
-    
-except DXtradeHTTPError as e:
-    print(f"HTTP {e.status_code}: {e.error_code}")
-    
-except DXtradeError as e:
-    print(f"General error: {e}")
+    async def run(self):
+        async with self.transport:
+            # Authenticate
+            await self.transport.authenticate()
+            print("✅ Authenticated with DXTrade")
+            
+            # Market data handler
+            async def handle_market_data(msg):
+                await self.forward_to_queue(msg, "market_data")
+            
+            # Portfolio handler
+            async def handle_portfolio(msg):
+                await self.forward_to_queue(msg, "portfolio")
+            
+            # Connect WebSockets
+            ws_market = os.getenv('DXTRADE_WS_MARKET_DATA_URL')
+            ws_portfolio = os.getenv('DXTRADE_WS_PORTFOLIO_URL')
+            
+            await self.transport.subscribe("quotes", handle_market_data, ws_market)
+            await self.transport.subscribe("portfolio", handle_portfolio, ws_portfolio)
+            
+            # Subscribe to data
+            account = os.getenv('DXTRADE_ACCOUNT')
+            await self.transport.send_market_data_subscription(
+                symbols=["EUR/USD", "GBP/USD"],
+                account=account
+            )
+            
+            await self.transport.send_portfolio_subscription(
+                account=account
+            )
+            
+            print("🌉 Bridge running - forwarding messages to queue")
+            
+            # Keep running
+            while True:
+                await asyncio.sleep(60)
+
+# Run the bridge
+bridge = DXTradeBridge()
+asyncio.run(bridge.run())
 ```
 
-## 🧪 Testing
+## Transport Layer for Bridges
 
-Run the test suite:
+The SDK is specifically designed to work as a transport layer for building bridges to message queues and other systems.
 
-```bash
-# Install development dependencies
-pip install -e ".[dev]"
+### Why Use Transport Layer?
 
-# Run tests with coverage
-pytest --cov=dxtrade --cov-report=html
+- **Minimal Overhead**: Lightweight implementation focused on data transport
+- **Raw Data Access**: Direct access to DXTrade messages without abstraction
+- **Flexible Integration**: Easy to integrate with any message queue or database
+- **Session Reuse**: Efficient session token management across connections
+- **Multi-Channel Support**: Handle different data streams simultaneously
 
-# Run specific test categories
-pytest -m "unit"          # Unit tests only
-pytest -m "integration"   # Integration tests only
-pytest -m "not slow"      # Skip slow tests
+### Bridge Architecture
+
+```
+DXTrade API → Transport Layer → Your Bridge → Message Queue
+                                              ↓
+                                         RabbitMQ/Kafka/Redis
+                                              ↓
+                                         Your Application
 ```
 
-## 🛠️ Development
+### Complete Bridge Example
+
+See [examples/bridge_example.py](examples/bridge_example.py) for a full implementation.
+
+## API Reference
+
+### DXTradeTransport
+
+The main transport class handles all communication with DXTrade.
+
+#### Methods
+
+```python
+# Authentication
+await transport.authenticate() -> str  # Returns session token
+
+# WebSocket Subscriptions
+await transport.subscribe(channel: str, callback: Callable, ws_url: str)
+await transport.unsubscribe(channel: str)
+
+# Market Data
+await transport.send_market_data_subscription(
+    symbols: list,
+    account: str = None,
+    event_types: list = None
+)
+
+# Portfolio
+await transport.send_portfolio_subscription(
+    account: str = None,
+    event_types: list = None
+)
+
+# Generic Message
+await transport.send_message(channel: str, message: dict)
+
+# REST API (if endpoints are configured)
+await transport.get_accounts()
+await transport.get_positions()
+await transport.get_orders()
+```
+
+### Message Types
+
+#### Market Data Message
+```json
+{
+    "type": "MarketData",
+    "payload": {
+        "events": [
+            {
+                "symbol": "EUR/USD",
+                "bid": 1.1234,
+                "ask": 1.1235,
+                "timestamp": "2024-01-01T00:00:00Z"
+            }
+        ]
+    }
+}
+```
+
+#### Portfolio Message
+```json
+{
+    "type": "AccountPortfolio",
+    "payload": {
+        "positions": [...],
+        "orders": [...],
+        "account": "your-account"
+    }
+}
+```
+
+#### Session Management (Automatic)
+```json
+// Server sends
+{"type": "PingRequest"}
+
+// SDK automatically responds
+{"type": "Ping"}
+```
+
+## Broker Configuration
+
+The SDK is **platform-agnostic** and works with any DXTrade broker through environment configuration.
+
+### Supported Brokers
+
+The SDK can work with any broker using the DXTrade platform. Simply configure the appropriate URLs in your environment variables.
+
+### Custom Endpoints
+
+If your broker uses non-standard endpoints, you can override them:
+
+```env
+# Custom API endpoints
+DXTRADE_LOGIN_URL=https://your-broker.com/custom/login
+DXTRADE_LOGOUT_URL=https://your-broker.com/custom/logout
+DXTRADE_ACCOUNTS_URL=https://your-broker.com/api/accounts
+DXTRADE_ORDERS_URL=https://your-broker.com/api/orders
+DXTRADE_POSITIONS_URL=https://your-broker.com/api/positions
+```
+
+### Feature Flags
+
+Enable or disable features based on your broker's capabilities:
+
+```env
+# Feature toggles
+DXTRADE_FEATURE_WEBSOCKET=true
+DXTRADE_FEATURE_AUTO_RECONNECT=true
+DXTRADE_FEATURE_PING_PONG=true
+```
+
+## WebSocket Features
+
+### Compatibility
+
+The SDK includes a 4-tier fallback system for WebSocket connections to ensure compatibility across different websockets library versions:
+
+1. `additional_headers` parameter (v12.0+)
+2. `extra_headers` parameter (v10.0-11.x)
+3. Subprotocol authentication (v9.0+)
+4. Post-connection authentication (v8.0+)
+
+### Automatic Session Management
+
+The SDK automatically handles DXTrade's ping/pong session extension:
+- Server sends `PingRequest` periodically
+- SDK automatically responds with `Ping`
+- Session stays active without manual intervention
+
+### Multi-Channel Support
+
+Connect to multiple WebSocket channels simultaneously:
+- Market data channel for quotes
+- Portfolio channel for account updates
+- Custom channels for specific data streams
+
+## Error Handling
+
+The SDK includes comprehensive error handling:
+
+- **Automatic Reconnection**: WebSocket disconnections trigger automatic reconnection
+- **Session Renewal**: Expired sessions are automatically renewed
+- **Graceful Degradation**: Falls back through multiple connection strategies
+- **Detailed Logging**: Comprehensive logging for debugging
+
+### Enable Debug Logging
+
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+### Common Issues and Solutions
+
+#### Authentication Fails
+- Verify `DXTRADE_USERNAME` and `DXTRADE_PASSWORD` are correct
+- Check `DXTRADE_BASE_URL` points to the correct server
+- Ensure your account has API access enabled
+
+#### WebSocket Connection Issues
+- Verify `DXTRADE_WS_MARKET_DATA_URL` is correct
+- Check network connectivity and firewall settings
+- Ensure WebSocket protocol is not blocked
+
+#### No Market Data Received
+- Verify market is open for the symbols you're subscribing to
+- Check symbol names match your broker's format
+- Ensure account has permissions for market data
+
+## Development
 
 ### Setup Development Environment
 
 ```bash
-# Clone repository
-git clone https://github.com/dxtrade/python-sdk.git
-cd python-sdk
+# Clone the repository
+git clone https://github.com/dxtrade-sdk/dxtrade-python-sdk.git
+cd dxtrade-python-sdk
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install in development mode
 pip install -e ".[dev]"
 
-# Install pre-commit hooks
-pre-commit install
+# Run tests
+pytest
 ```
 
-### Code Quality Tools
+### Running Tests
 
 ```bash
-# Format code
-black src tests
-ruff check --fix src tests
+# Run all tests
+pytest
 
-# Type checking
-mypy src
+# Run with coverage
+pytest --cov=dxtrade
 
-# Run all quality checks
-ruff check src tests
-black --check src tests
-mypy src
+# Run specific test file
+pytest tests/test_transport.py
 ```
 
-## 📚 API Reference
+### Code Quality
 
-### Main Client
-- `DXtradeClient` - Main client class with unified interface
-- `DXtradeClient.create_with_bearer_token()` - Bearer token factory
-- `DXtradeClient.create_with_hmac()` - HMAC factory
-- `DXtradeClient.create_with_session()` - Session factory
+```bash
+# Format code with black
+black src/ tests/
 
-### REST APIs
-- `client.accounts` - Account management and balances
-- `client.instruments` - Instrument data and market info
-- `client.orders` - Order management and trade history
-- `client.positions` - Position management
+# Lint with ruff
+ruff check src/ tests/
 
-### WebSocket API
-- `client.push` - WebSocket streaming client
-- `client.push.subscribe_prices()` - Price updates
-- `client.push.subscribe_orders()` - Order updates
-- `client.push.subscribe_positions()` - Position updates
-- `client.push.subscribe_account()` - Account updates
+# Type check with mypy
+mypy src/
+```
 
-### Models
-All API entities are represented as typed Pydantic models:
-- `Account`, `Balance` - Account information
-- `Instrument`, `Price`, `Tick`, `Candle` - Market data
-- `Order`, `Trade` - Trading entities
-- `Position` - Position information
-- Event models for WebSocket streaming
+## PyPI Publishing
 
-## 🤝 Contributing
+### Prerequisites
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+1. Create accounts at [PyPI](https://pypi.org) and [TestPyPI](https://test.pypi.org)
+2. Install build tools: `pip install build twine`
+3. Generate API tokens from your PyPI account settings
+
+### Publishing Process
+
+1. **Update version** in `pyproject.toml` and `src/dxtrade/__init__.py`
+2. **Update CHANGELOG.md** with release notes
+3. **Build the package**:
+   ```bash
+   python -m build
+   ```
+4. **Test on TestPyPI**:
+   ```bash
+   python -m twine upload --repository testpypi dist/*
+   ```
+5. **Publish to PyPI**:
+   ```bash
+   python -m twine upload dist/*
+   ```
+
+### Version Management
+
+Follow semantic versioning:
+- **Patch** (1.0.X): Bug fixes, minor updates
+- **Minor** (1.X.0): New features, backward compatible
+- **Major** (X.0.0): Breaking changes
+
+## Changelog
+
+### [1.0.0] - 2025-01-06
+
+#### Added
+- Initial public release of DXTrade Python SDK
+- High-level SDK with full async/await support
+- Type-safe operations using Pydantic models
+- Comprehensive WebSocket streaming capabilities
+- Transport layer for bridge/middleware integration
+- Session management with automatic token refresh
+- Rate limiting and exponential backoff retry logic
+- Support for multiple DXTrade brokers
+- Full test suite with pytest
+- Comprehensive documentation and examples
+
+#### Features
+- **Authentication**: Secure login with session token management
+- **REST API**: Complete coverage of DXTrade REST endpoints
+- **WebSocket Streaming**: Real-time data feeds
+- **Transport Layer**: Raw data passthrough for integrations
+
+See [CHANGELOG.md](CHANGELOG.md) for complete version history.
+
+## Testing
+
+The SDK has been tested with:
+- DXTrade Platform
+- Various WebSocket library versions (8.0-15.0)
+- Python 3.10, 3.11, 3.12, 3.13
+
+## Support
+
+- 📧 Email: support@dxtrade-sdk.com
+- 🐛 Issues: [GitHub Issues](https://github.com/dxtrade-sdk/dxtrade-python-sdk/issues)
+- 💬 Discussions: [GitHub Discussions](https://github.com/dxtrade-sdk/dxtrade-python-sdk/discussions)
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make your changes with tests
-4. Run quality checks (`ruff check`, `mypy`, `pytest`)
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to the branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
-## 📄 License
+## Security
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+- Never commit credentials to version control
+- Use environment variables for all sensitive data
+- Rotate API tokens regularly
+- Report security issues privately via email
 
-## 📞 Support
+## License
 
-- 📖 [Documentation](https://dxtrade-python-sdk.readthedocs.io/)
-- 🐛 [Issue Tracker](https://github.com/dxtrade/python-sdk/issues)
-- 💬 [Discussions](https://github.com/dxtrade/python-sdk/discussions)
-- 📧 Email: support@dxtrade.com
+MIT License - see [LICENSE](LICENSE) file for details.
 
-## ⭐ Star History
+## Disclaimer
 
-If this SDK helps you, please consider starring the repository!
+This SDK is not officially affiliated with or endorsed by DXTrade. Use at your own risk. Trading involves substantial risk of loss and is not suitable for every investor.
 
 ---
 
-Built with ❤️ by the DXtrade team
+**Built with ❤️ for the trading community**

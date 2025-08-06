@@ -3,34 +3,42 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "dxtrade"
+name = "dxtrade-sdk"
 version = "1.0.0"
-description = "Production-ready Python SDK for DXtrade REST and WebSocket APIs"
+description = "Python SDK for DXTrade trading platform - REST API, WebSocket streaming, and transport layer"
 readme = "README.md"
-license = "MIT"
+license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
-    {name = "DXtrade Python SDK Team", email = "support@dxtrade.com"},
+    {name = "Scott Hooker", email = "scott@dxtrade-sdk.com"},
 ]
-keywords = ["dxtrade", "trading", "finance", "api", "websocket"]
+maintainers = [
+    {name = "Scott Hooker", email = "scott@dxtrade-sdk.com"},
+]
+keywords = ["dxtrade", "trading", "api", "websocket", "finance", "forex", "stocks", "crypto", "transport", "sdk", "client"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Office/Business :: Financial :: Investment",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Networking",
     "Typing :: Typed",
+    "Natural Language :: English",
 ]
 
 dependencies = [
-    "httpx>=0.26.0",
-    "pydantic>=2.5.0",
+    "aiohttp>=3.8.0",
     "websockets>=12.0",
-    "backoff>=2.2.0",
+    "pydantic>=2.5.0",
+    "python-dotenv>=1.0.0",
     "typing-extensions>=4.8.0",
 ]
 
@@ -43,7 +51,6 @@ dev = [
     "ruff>=0.1.6",
     "mypy>=1.7.0",
     "black>=23.11.0",
-    "types-backoff",
 ]
 docs = [
     "mkdocs>=1.5.3",
@@ -52,10 +59,12 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/dxtrade/python-sdk"
-Documentation = "https://dxtrade-python-sdk.readthedocs.io/"
-Repository = "https://github.com/dxtrade/python-sdk"
-Issues = "https://github.com/dxtrade/python-sdk/issues"
+Homepage = "https://github.com/dxtrade-sdk/dxtrade-python-sdk"
+Documentation = "https://github.com/dxtrade-sdk/dxtrade-python-sdk/tree/main/docs"
+Repository = "https://github.com/dxtrade-sdk/dxtrade-python-sdk"
+"Bug Tracker" = "https://github.com/dxtrade-sdk/dxtrade-python-sdk/issues"
+"Source Code" = "https://github.com/dxtrade-sdk/dxtrade-python-sdk"
+Changelog = "https://github.com/dxtrade-sdk/dxtrade-python-sdk/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dxtrade"]
@@ -63,9 +72,12 @@ packages = ["src/dxtrade"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
-    "/tests",
+    "/tests", 
+    "/examples",
+    "/docs",
     "/README.md",
     "/LICENSE",
+    "/.env.example",
 ]
 
 # Ruff configuration

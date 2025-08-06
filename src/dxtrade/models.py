@@ -100,10 +100,16 @@ class MarketStatus(str, Enum):
 class EventType(str, Enum):
     """Push API event type enumeration."""
     PRICE = "price"
+    QUOTE = "Quote"  # DXTrade Quote event
+    CANDLE = "Candle"  # DXTrade Candle event
     ORDER = "order"
     POSITION = "position"
     ACCOUNT = "account"
     HEARTBEAT = "heartbeat"
+    MARKET_DATA = "MarketData"  # DXTrade MarketData wrapper
+    PORTFOLIO = "AccountPortfolios"  # DXTrade Portfolio data
+    PING = "Ping"  # DXTrade Ping
+    PONG = "Pong"  # DXTrade Pong
 
 
 class AuthType(str, Enum):
@@ -365,15 +371,40 @@ class Trade(DXtradeBaseModel):
 
 class PushEvent(DXtradeBaseModel):
     """Base push API event."""
-    type: EventType = Field(..., description="Event type")
-    timestamp: datetime = Field(..., description="Event timestamp")
-    data: Dict[str, Any] = Field(..., description="Event data")
+    type: str = Field(..., description="Event type")
+    timestamp: Optional[datetime] = Field(None, description="Event timestamp")
+    data: Optional[Dict[str, Any]] = Field(None, description="Event data")
 
 
 class PriceEvent(PushEvent):
     """Price update event."""
     type: Literal[EventType.PRICE] = Field(EventType.PRICE, description="Event type")
     data: Price = Field(..., description="Price data")
+
+
+class MarketDataEvent(DXtradeBaseModel):
+    """DXTrade MarketData event wrapper."""
+    type: Literal["MarketData"] = Field("MarketData", description="Event type")
+    payload: Dict[str, Any] = Field(..., description="Market data payload")
+    
+
+class QuoteData(DXtradeBaseModel):
+    """DXTrade Quote data."""
+    symbol: str = Field(..., description="Symbol")
+    bid: Decimal = Field(..., description="Bid price")
+    ask: Decimal = Field(..., description="Ask price")
+    time: datetime = Field(..., description="Quote timestamp")
+
+
+class CandleData(DXtradeBaseModel):
+    """DXTrade Candle data."""
+    symbol: str = Field(..., description="Symbol")
+    open: Decimal = Field(..., description="Open price")
+    close: Decimal = Field(..., description="Close price")
+    high: Decimal = Field(..., description="High price")
+    low: Decimal = Field(..., description="Low price")
+    volume: Optional[Decimal] = Field(None, description="Volume")
+    time: datetime = Field(..., description="Candle timestamp")
 
 
 class OrderEvent(PushEvent):
@@ -386,6 +417,47 @@ class PositionEvent(PushEvent):
     """Position update event."""
     type: Literal[EventType.POSITION] = Field(EventType.POSITION, description="Event type")
     data: Position = Field(..., description="Position data")
+
+
+class PortfolioPosition(DXtradeBaseModel):
+    """DXTrade portfolio position."""
+    symbol: str = Field(..., description="Symbol")
+    side: str = Field(..., description="Position side (BUY/SELL)")
+    quantity: str = Field(..., description="Position quantity")
+    openPrice: str = Field(..., description="Open price")
+    positionCode: str = Field(..., description="Position code")
+    openTime: str = Field(..., description="Open timestamp")
+
+
+class OrderExecution(DXtradeBaseModel):
+    """DXTrade order execution."""
+    executionCode: str = Field(..., description="Execution code")
+    lastQuantity: str = Field(..., description="Executed quantity")
+    lastPrice: str = Field(..., description="Execution price")
+    transactionTime: str = Field(..., description="Transaction timestamp")
+
+
+class PortfolioOrder(DXtradeBaseModel):
+    """DXTrade portfolio order."""
+    orderCode: str = Field(..., description="Order code")
+    instrument: str = Field(..., description="Instrument symbol")
+    side: str = Field(..., description="Order side")
+    status: str = Field(..., description="Order status (COMPLETED/WORKING)")
+    finalStatus: bool = Field(..., description="Is final status")
+    executions: Optional[List[OrderExecution]] = Field(None, description="Order executions")
+
+
+class Portfolio(DXtradeBaseModel):
+    """DXTrade portfolio data."""
+    account: str = Field(..., description="Account identifier")
+    positions: Optional[List[PortfolioPosition]] = Field(None, description="Positions")
+    orders: Optional[List[PortfolioOrder]] = Field(None, description="Orders")
+
+
+class PortfolioEvent(DXtradeBaseModel):
+    """DXTrade portfolio event."""
+    type: Literal["AccountPortfolios"] = Field("AccountPortfolios", description="Event type")
+    payload: Dict[str, Any] = Field(..., description="Portfolio payload")
 
 
 class AccountEvent(PushEvent):
@@ -495,5 +567,5 @@ class ServerTime(DXtradeBaseModel):
 
 # Union types for convenience
 AnyOrder = Union[Order, OCOOrderRequest, BracketOrderRequest]
-AnyEvent = Union[PriceEvent, OrderEvent, PositionEvent, AccountEvent, HeartbeatEvent]
+AnyEvent = Union[PriceEvent, OrderEvent, PositionEvent, AccountEvent, HeartbeatEvent, MarketDataEvent, PortfolioEvent]
 AnyCredentials = Union[BearerTokenCredentials, HMACCredentials, SessionCredentials]

@@ -1,18 +1,13 @@
-"""DXtrade Python SDK - Production-ready async client for DXtrade APIs."""
-
-from dxtrade.client import DXtradeClient
-from dxtrade.errors import DXtradeError
-from dxtrade.errors import DXtradeHTTPError
-from dxtrade.errors import DXtradeRateLimitError
-from dxtrade.errors import DXtradeTimeoutError
-from dxtrade.errors import DXtradeWebSocketError
+"""DXTrade Python SDK - Minimal transport and SDK for DXTrade APIs."""
 
 __version__ = "1.0.0"
+
+# Transport layer - core functionality that works
+from .transport import DXTradeTransport, create_transport
+
+# Basic exports for now
 __all__ = [
-    "DXtradeClient",
-    "DXtradeError",
-    "DXtradeHTTPError", 
-    "DXtradeRateLimitError",
-    "DXtradeTimeoutError",
-    "DXtradeWebSocketError",
+    "DXTradeTransport",
+    "create_transport",
+    "__version__",
 ]

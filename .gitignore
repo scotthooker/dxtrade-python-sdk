@@ -138,6 +138,11 @@ site/
 config.ini
 config.yaml
 secrets.json
+credentials.json
+auth.json
+*.key
+*.pem
+*.crt
 
 # Test outputs
 test-results/
@@ -149,3 +154,13 @@ test-outputs/
 # Claude
 .claude/
 CLAUDE.md
+
+# Test files
+test_*.py
+*_test.py
+CONFIRMATION.md
+
+# Development files
+*.bak
+*.orig
+old/

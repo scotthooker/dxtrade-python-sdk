@@ -1,278 +1,348 @@
-"""Positions API endpoints."""
+"""
+Positions REST API client.
 
-from __future__ import annotations
+Provides methods for managing trading positions and portfolio information.
+"""
 
-from typing import Dict
-from typing import List
-from typing import Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+from decimal import Decimal
 
-from dxtrade.models import PaginatedResponse
-from dxtrade.models import Position
-from dxtrade.rest.base import BaseAPI
+from ..core.http_client import HTTPClient
+from ..types.trading import Position, PositionSide
+from ..errors import ValidationError
 
 
-class PositionsAPI(BaseAPI):
-    """API for position management."""
+class PositionQuery:
+    """Position query parameters."""
     
-    async def get_positions(
+    def __init__(
         self,
         account_id: Optional[str] = None,
-        *,
         symbol: Optional[str] = None,
-        limit: int = 100,
-        offset: int = 0,
-        timeout: Optional[float] = None,
-    ) -> PaginatedResponse:
-        """Get positions with optional filtering.
+        side: Optional[PositionSide] = None,
+        status: Optional[str] = None,
+        from_date: Optional[datetime] = None,
+        to_date: Optional[datetime] = None,
+        page: Optional[int] = None,
+        limit: Optional[int] = None,
+    ):
+        """Initialize position query."""
+        self.account_id = account_id
+        self.symbol = symbol
+        self.side = side
+        self.status = status
+        self.from_date = from_date
+        self.to_date = to_date
+        self.page = page
+        self.limit = limit
         
-        Args:
-            account_id: Optional account filter
-            symbol: Optional symbol filter
-            limit: Maximum number of positions
-            offset: Pagination offset
-            timeout: Request timeout
-            
-        Returns:
-            Paginated list of positions
-        """
-        params = {"limit": limit, "offset": offset}
-        if account_id:
-            params["account_id"] = account_id
-        if symbol:
-            params["symbol"] = symbol
-        
-        return await self._get_paginated("/positions", Position, params=params, timeout=timeout)
+    def to_params(self) -> Dict[str, Any]:
+        """Convert to request parameters."""
+        params = {}
+        if self.account_id:
+            params["accountId"] = self.account_id
+        if self.symbol:
+            params["symbol"] = self.symbol
+        if self.side:
+            params["side"] = self.side.value
+        if self.status:
+            params["status"] = self.status
+        if self.from_date:
+            params["fromDate"] = int(self.from_date.timestamp())
+        if self.to_date:
+            params["toDate"] = int(self.to_date.timestamp())
+        if self.page:
+            params["page"] = self.page
+        if self.limit:
+            params["limit"] = self.limit
+        return params
+
+
+class PositionModification:
+    """Position modification parameters."""
     
-    async def get_position(
+    def __init__(
         self,
-        position_id: str,
-        *,
-        timeout: Optional[float] = None,
-    ) -> Position:
-        """Get position by ID.
+        stop_loss: Optional[Decimal] = None,
+        take_profit: Optional[Decimal] = None,
+        comment: Optional[str] = None,
+    ):
+        """Initialize position modification."""
+        self.stop_loss = stop_loss
+        self.take_profit = take_profit
+        self.comment = comment
         
-        Args:
-            position_id: Position identifier
-            timeout: Request timeout
-            
-        Returns:
-            Position information
-        """
-        return await self._get_data(f"/positions/{position_id}", Position, timeout=timeout)
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to request data."""
+        data = {}
+        if self.stop_loss is not None:
+            data["stopLoss"] = str(self.stop_loss)
+        if self.take_profit is not None:
+            data["takeProfit"] = str(self.take_profit)
+        if self.comment is not None:
+            data["comment"] = self.comment
+        return data
+
+
+class PositionCloseRequest:
+    """Position close request parameters."""
     
-    async def get_position_by_symbol(
+    def __init__(
         self,
-        account_id: str,
-        symbol: str,
-        *,
-        timeout: Optional[float] = None,
-    ) -> Optional[Position]:
-        """Get position by account and symbol.
+        volume: Optional[Decimal] = None,  # None means close entire position
+        price: Optional[Decimal] = None,   # Market order if None
+        comment: Optional[str] = None,
+    ):
+        """Initialize position close request."""
+        self.volume = volume
+        self.price = price
+        self.comment = comment
         
-        Args:
-            account_id: Account identifier
-            symbol: Instrument symbol
-            timeout: Request timeout
-            
-        Returns:
-            Position information or None if no position
-        """
-        try:
-            return await self._get_data(
-                f"/accounts/{account_id}/positions/{symbol}",
-                Position,
-                timeout=timeout
-            )
-        except Exception:
-            # Position doesn't exist
-            return None
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to request data."""
+        data = {}
+        if self.volume is not None:
+            data["volume"] = str(self.volume)
+        if self.price is not None:
+            data["price"] = str(self.price)
+        if self.comment is not None:
+            data["comment"] = self.comment
+        return data
+
+
+class PositionStatistics:
+    """Position statistics information."""
     
-    async def close_position(
-        self,
-        position_id: str,
-        *,
-        volume: Optional[float] = None,
-        timeout: Optional[float] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> Position:
-        """Close a position (full or partial).
-        
-        Args:
-            position_id: Position identifier
-            volume: Optional partial close volume (if None, closes entire position)
-            timeout: Request timeout
-            idempotency_key: Idempotency key
-            
-        Returns:
-            Updated position after close
-        """
-        close_data = {}
-        if volume is not None:
-            close_data["volume"] = volume
-        
-        return await self._post_data(
-            f"/positions/{position_id}/close",
-            Position,
-            json=close_data if close_data else None,
-            timeout=timeout,
-            idempotency_key=idempotency_key,
-        )
+    def __init__(self, data: Dict[str, Any]):
+        """Initialize from API response data."""
+        self.position_id: str = data["positionId"]
+        self.symbol: str = data["symbol"]
+        self.duration: int = data["duration"]  # Duration in seconds
+        self.max_profit: Decimal = Decimal(str(data["maxProfit"]))
+        self.max_loss: Decimal = Decimal(str(data["maxLoss"]))
+        self.current_profit: Decimal = Decimal(str(data["currentProfit"]))
+        self.profit_factor: Decimal = Decimal(str(data.get("profitFactor", "0")))
+        self.win_rate: Decimal = Decimal(str(data.get("winRate", "0")))
+        self.total_commission: Decimal = Decimal(str(data.get("totalCommission", "0")))
+        self.total_swap: Decimal = Decimal(str(data.get("totalSwap", "0")))
+
+
+class PositionRisk:
+    """Position risk information."""
     
-    async def close_position_by_symbol(
-        self,
-        account_id: str,
-        symbol: str,
-        *,
-        volume: Optional[float] = None,
-        timeout: Optional[float] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> Optional[Position]:
-        """Close position by account and symbol.
-        
-        Args:
-            account_id: Account identifier
-            symbol: Instrument symbol
-            volume: Optional partial close volume
-            timeout: Request timeout
-            idempotency_key: Idempotency key
-            
-        Returns:
-            Updated position after close or None if no position
-        """
-        close_data = {}
-        if volume is not None:
-            close_data["volume"] = volume
-        
-        try:
-            return await self._post_data(
-                f"/accounts/{account_id}/positions/{symbol}/close",
-                Position,
-                json=close_data if close_data else None,
-                timeout=timeout,
-                idempotency_key=idempotency_key,
-            )
-        except Exception:
-            # Position doesn't exist
-            return None
+    def __init__(self, data: Dict[str, Any]):
+        """Initialize from API response data."""
+        self.position_id: str = data["positionId"]
+        self.symbol: str = data["symbol"]
+        self.risk_score: Decimal = Decimal(str(data["riskScore"]))
+        self.margin_used: Decimal = Decimal(str(data["marginUsed"]))
+        self.margin_available: Decimal = Decimal(str(data["marginAvailable"]))
+        self.margin_call_level: Decimal = Decimal(str(data["marginCallLevel"]))
+        self.stop_out_level: Decimal = Decimal(str(data["stopOutLevel"]))
+        self.risk_warnings: List[str] = data.get("riskWarnings", [])
+
+
+class PortfolioSummary:
+    """Portfolio summary information."""
     
-    async def close_all_positions(
-        self,
-        account_id: str,
-        *,
-        symbol: Optional[str] = None,
-        timeout: Optional[float] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> List[Position]:
-        """Close all positions for an account.
+    def __init__(self, data: Dict[str, Any]):
+        """Initialize from API response data."""
+        self.account_id: str = data["accountId"]
+        self.total_positions: int = data["totalPositions"]
+        self.total_volume: Decimal = Decimal(str(data["totalVolume"]))
+        self.total_margin_used: Decimal = Decimal(str(data["totalMarginUsed"]))
+        self.total_unrealized_pnl: Decimal = Decimal(str(data["totalUnrealizedPnl"]))
+        self.total_realized_pnl: Decimal = Decimal(str(data["totalRealizedPnl"]))
+        self.total_commission: Decimal = Decimal(str(data["totalCommission"]))
+        self.total_swap: Decimal = Decimal(str(data["totalSwap"]))
+        self.currency: str = data["currency"]
+        self.last_update: datetime = datetime.fromtimestamp(data["lastUpdate"])
         
-        Args:
-            account_id: Account identifier
-            symbol: Optional symbol filter
-            timeout: Request timeout
-            idempotency_key: Idempotency key
-            
-        Returns:
-            List of closed positions
-        """
-        close_data = {"account_id": account_id}
-        if symbol:
-            close_data["symbol"] = symbol
+        # Positions by symbol
+        self.positions_by_symbol: Dict[str, int] = data.get("positionsBySymbol", {})
         
-        response = await self._request(
-            "POST",
-            "/positions/close-all",
-            json=close_data,
-            timeout=timeout,
-            idempotency_key=idempotency_key,
-        )
-        return await self._parse_list_response(response, Position)
+        # Positions by side
+        self.long_positions: int = data.get("longPositions", 0)
+        self.short_positions: int = data.get("shortPositions", 0)
+
+
+class PositionsAPI:
+    """Positions REST API client."""
     
+    def __init__(self, http_client: HTTPClient):
+        """Initialize with HTTP client."""
+        self.http = http_client
+        
+    async def get_positions(
+        self, 
+        query: Optional[PositionQuery] = None
+    ) -> Dict[str, Any]:
+        """Get positions with optional filtering."""
+        params = query.to_params() if query else {}
+        
+        response = await self.http.get("/positions", params=params)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve positions")
+            
+        positions = [Position(**position) for position in response.data.get("positions", [])]
+        
+        return {
+            "positions": positions,
+            "pagination": response.data.get("pagination")
+        }
+        
+    async def get_position(self, position_id: str) -> Position:
+        """Get position by ID."""
+        response = await self.http.get(f"/positions/{position_id}")
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve position")
+            
+        return Position(**response.data)
+        
     async def modify_position(
         self,
         position_id: str,
-        *,
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None,
-        timeout: Optional[float] = None,
-        idempotency_key: Optional[str] = None,
+        modification: PositionModification
     ) -> Position:
-        """Modify position stop loss or take profit.
+        """Modify position (e.g., set stop loss/take profit)."""
+        data = modification.to_dict()
         
-        Args:
-            position_id: Position identifier
-            stop_loss: New stop loss price (None to remove)
-            take_profit: New take profit price (None to remove)
-            timeout: Request timeout
-            idempotency_key: Idempotency key
+        response = await self.http.put(f"/positions/{position_id}", data=data)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to modify position")
             
-        Returns:
-            Modified position
-        """
-        updates = {}
-        if stop_loss is not None:
-            updates["stop_loss"] = stop_loss
-        if take_profit is not None:
-            updates["take_profit"] = take_profit
+        return Position(**response.data)
         
-        return await self._patch_data(
-            f"/positions/{position_id}",
-            Position,
-            json=updates,
-            timeout=timeout,
-            idempotency_key=idempotency_key,
-        )
-    
-    async def get_position_summary(
+    async def close_position(
+        self,
+        position_id: str,
+        close_request: Optional[PositionCloseRequest] = None
+    ) -> Position:
+        """Close position (partially or completely)."""
+        data = close_request.to_dict() if close_request else {}
+        
+        response = await self.http.post(f"/positions/{position_id}/close", data=data)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to close position")
+            
+        return Position(**response.data)
+        
+    async def close_positions(
+        self,
+        account_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> List[Position]:
+        """Close multiple positions."""
+        data = {}
+        if account_id:
+            data["accountId"] = account_id
+        if symbol:
+            data["symbol"] = symbol
+            
+        response = await self.http.post("/positions/close", data=data)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to close positions")
+            
+        return [Position(**position) for position in response.data]
+        
+    async def get_position_history(
+        self,
+        query: Optional[PositionQuery] = None
+    ) -> Dict[str, Any]:
+        """Get position history (closed positions)."""
+        params = query.to_params() if query else {}
+        
+        response = await self.http.get("/positions/history", params=params)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve position history")
+            
+        positions = [Position(**position) for position in response.data.get("positions", [])]
+        
+        return {
+            "positions": positions,
+            "pagination": response.data.get("pagination")
+        }
+        
+    async def get_position_statistics(self, position_id: str) -> PositionStatistics:
+        """Get detailed position statistics."""
+        response = await self.http.get(f"/positions/{position_id}/statistics")
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve position statistics")
+            
+        return PositionStatistics(response.data)
+        
+    async def get_position_risk(self, position_id: str) -> PositionRisk:
+        """Get position risk assessment."""
+        response = await self.http.get(f"/positions/{position_id}/risk")
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve position risk")
+            
+        return PositionRisk(response.data)
+        
+    async def get_portfolio_summary(self, account_id: str) -> PortfolioSummary:
+        """Get portfolio summary for an account."""
+        response = await self.http.get(f"/accounts/{account_id}/portfolio")
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve portfolio summary")
+            
+        return PortfolioSummary(response.data)
+        
+    async def get_portfolio_performance(
         self,
         account_id: str,
-        *,
-        currency: Optional[str] = None,
-        timeout: Optional[float] = None,
-    ) -> Dict[str, float]:
-        """Get position summary for account.
-        
-        Args:
-            account_id: Account identifier
-            currency: Optional currency filter
-            timeout: Request timeout
-            
-        Returns:
-            Position summary metrics
-        """
+        from_date: Optional[datetime] = None,
+        to_date: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Get portfolio performance metrics."""
         params = {}
-        if currency:
-            params["currency"] = currency
+        if from_date:
+            params["fromDate"] = int(from_date.timestamp())
+        if to_date:
+            params["toDate"] = int(to_date.timestamp())
+            
+        response = await self.http.get(f"/accounts/{account_id}/performance", params=params)
         
-        response = await self._request(
-            "GET",
-            f"/accounts/{account_id}/positions/summary",
-            params=params,
-            timeout=timeout,
-        )
-        data = response.json()
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve portfolio performance")
+            
+        return response.data
         
-        return data.get("data", {}) if isinstance(data, dict) else data
-    
-    async def get_exposure_summary(
+    async def get_portfolio_risk(self, account_id: str) -> Dict[str, Any]:
+        """Get overall portfolio risk assessment."""
+        response = await self.http.get(f"/accounts/{account_id}/risk")
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve portfolio risk")
+            
+        return response.data
+        
+    async def calculate_position_size(
         self,
         account_id: str,
-        *,
-        timeout: Optional[float] = None,
-    ) -> Dict[str, Dict[str, float]]:
-        """Get exposure summary by instrument and currency.
+        symbol: str,
+        risk_percent: Decimal,
+        stop_loss_distance: Decimal,
+    ) -> Dict[str, Any]:
+        """Calculate optimal position size based on risk parameters."""
+        data = {
+            "symbol": symbol,
+            "riskPercent": str(risk_percent),
+            "stopLossDistance": str(stop_loss_distance),
+        }
         
-        Args:
-            account_id: Account identifier
-            timeout: Request timeout
+        response = await self.http.post(f"/accounts/{account_id}/position-size", data=data)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to calculate position size")
             
-        Returns:
-            Exposure summary by symbol and currency
-        """
-        response = await self._request(
-            "GET",
-            f"/accounts/{account_id}/exposure",
-            timeout=timeout,
-        )
-        data = response.json()
-        
-        return data.get("data", {}) if isinstance(data, dict) else data
+        return response.data

@@ -1,320 +1,373 @@
-"""Orders API endpoints."""
+"""
+Orders REST API client.
 
-from __future__ import annotations
+Provides methods for placing, modifying, and managing trading orders.
+"""
 
-from typing import Dict
-from typing import List
-from typing import Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+from decimal import Decimal
 
-from dxtrade.models import BracketOrderRequest
-from dxtrade.models import OCOOrderRequest
-from dxtrade.models import Order
-from dxtrade.models import OrderRequest
-from dxtrade.models import OrderStatus
-from dxtrade.models import PaginatedResponse
-from dxtrade.models import Trade
-from dxtrade.rest.base import BaseAPI
+from ..core.http_client import HTTPClient
+from ..types.trading import Order, OrderRequest, OrderSide, OrderType, OrderStatus, TimeInForce
+from ..errors import ValidationError
 
 
-class OrdersAPI(BaseAPI):
-    """API for order management and trade history."""
+class OrderModification:
+    """Order modification parameters."""
     
-    async def get_orders(
+    def __init__(
+        self,
+        order_id: str,
+        volume: Optional[Decimal] = None,
+        price: Optional[Decimal] = None,
+        stop_price: Optional[Decimal] = None,
+        time_in_force: Optional[TimeInForce] = None,
+    ):
+        """Initialize order modification."""
+        self.order_id = order_id
+        self.volume = volume
+        self.price = price
+        self.stop_price = stop_price
+        self.time_in_force = time_in_force
+        
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to request data."""
+        data = {}
+        if self.volume is not None:
+            data["volume"] = str(self.volume)
+        if self.price is not None:
+            data["price"] = str(self.price)
+        if self.stop_price is not None:
+            data["stopPrice"] = str(self.stop_price)
+        if self.time_in_force is not None:
+            data["timeInForce"] = self.time_in_force.value
+        return data
+
+
+class OrderQuery:
+    """Order query parameters."""
+    
+    def __init__(
         self,
         account_id: Optional[str] = None,
-        *,
         symbol: Optional[str] = None,
         status: Optional[OrderStatus] = None,
-        limit: int = 100,
-        offset: int = 0,
-        timeout: Optional[float] = None,
-    ) -> PaginatedResponse:
-        """Get orders with optional filtering.
+        side: Optional[OrderSide] = None,
+        order_type: Optional[OrderType] = None,
+        from_date: Optional[datetime] = None,
+        to_date: Optional[datetime] = None,
+        page: Optional[int] = None,
+        limit: Optional[int] = None,
+    ):
+        """Initialize order query."""
+        self.account_id = account_id
+        self.symbol = symbol
+        self.status = status
+        self.side = side
+        self.order_type = order_type
+        self.from_date = from_date
+        self.to_date = to_date
+        self.page = page
+        self.limit = limit
         
-        Args:
-            account_id: Optional account filter
-            symbol: Optional symbol filter
-            status: Optional status filter
-            limit: Maximum number of orders
-            offset: Pagination offset
-            timeout: Request timeout
-            
-        Returns:
-            Paginated list of orders
-        """
-        params = {"limit": limit, "offset": offset}
-        if account_id:
-            params["account_id"] = account_id
-        if symbol:
-            params["symbol"] = symbol
-        if status:
-            params["status"] = status.value
-        
-        return await self._get_paginated("/orders", Order, params=params, timeout=timeout)
-    
-    async def get_order(
-        self,
-        order_id: str,
-        *,
-        timeout: Optional[float] = None,
-    ) -> Order:
-        """Get order by ID.
-        
-        Args:
-            order_id: Order identifier
-            timeout: Request timeout
-            
-        Returns:
-            Order information
-        """
-        return await self._get_data(f"/orders/{order_id}", Order, timeout=timeout)
-    
-    async def create_order(
-        self,
-        order: OrderRequest,
-        *,
-        timeout: Optional[float] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> Order:
-        """Create a new order.
-        
-        Args:
-            order: Order request
-            timeout: Request timeout
-            idempotency_key: Idempotency key
-            
-        Returns:
-            Created order
-        """
-        order_data = order.model_dump(exclude_unset=True)
-        return await self._post_data(
-            "/orders",
-            Order,
-            json=order_data,
-            timeout=timeout,
-            idempotency_key=idempotency_key,
-        )
-    
-    async def create_oco_order(
-        self,
-        order: OCOOrderRequest,
-        *,
-        timeout: Optional[float] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> List[Order]:
-        """Create a One-Cancels-Other order.
-        
-        Args:
-            order: OCO order request
-            timeout: Request timeout
-            idempotency_key: Idempotency key
-            
-        Returns:
-            List of created orders (usually 2)
-        """
-        order_data = order.model_dump(exclude_unset=True)
-        return await self._post_data(
-            "/orders/oco",
-            List[Order],  # type: ignore
-            json=order_data,
-            timeout=timeout,
-            idempotency_key=idempotency_key,
-        )
-    
-    async def create_bracket_order(
-        self,
-        order: BracketOrderRequest,
-        *,
-        timeout: Optional[float] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> List[Order]:
-        """Create a bracket order.
-        
-        Args:
-            order: Bracket order request
-            timeout: Request timeout
-            idempotency_key: Idempotency key
-            
-        Returns:
-            List of created orders (parent + stop loss + take profit)
-        """
-        order_data = order.model_dump(exclude_unset=True)
-        return await self._post_data(
-            "/orders/bracket",
-            List[Order],  # type: ignore
-            json=order_data,
-            timeout=timeout,
-            idempotency_key=idempotency_key,
-        )
-    
-    async def modify_order(
-        self,
-        order_id: str,
-        *,
-        volume: Optional[float] = None,
-        price: Optional[float] = None,
-        stop_price: Optional[float] = None,
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None,
-        timeout: Optional[float] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> Order:
-        """Modify an existing order.
-        
-        Args:
-            order_id: Order identifier
-            volume: New volume
-            price: New limit price
-            stop_price: New stop price
-            stop_loss: New stop loss price
-            take_profit: New take profit price
-            timeout: Request timeout
-            idempotency_key: Idempotency key
-            
-        Returns:
-            Modified order
-        """
-        updates = {}
-        if volume is not None:
-            updates["volume"] = volume
-        if price is not None:
-            updates["price"] = price
-        if stop_price is not None:
-            updates["stop_price"] = stop_price
-        if stop_loss is not None:
-            updates["stop_loss"] = stop_loss
-        if take_profit is not None:
-            updates["take_profit"] = take_profit
-        
-        return await self._patch_data(
-            f"/orders/{order_id}",
-            Order,
-            json=updates,
-            timeout=timeout,
-            idempotency_key=idempotency_key,
-        )
-    
-    async def cancel_order(
-        self,
-        order_id: str,
-        *,
-        timeout: Optional[float] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> Order:
-        """Cancel an order.
-        
-        Args:
-            order_id: Order identifier
-            timeout: Request timeout
-            idempotency_key: Idempotency key
-            
-        Returns:
-            Cancelled order
-        """
-        return await self._delete_data(
-            f"/orders/{order_id}",
-            Order,
-            timeout=timeout,
-            idempotency_key=idempotency_key,
-        )
-    
-    async def cancel_all_orders(
-        self,
-        *,
-        account_id: Optional[str] = None,
-        symbol: Optional[str] = None,
-        timeout: Optional[float] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> List[Order]:
-        """Cancel multiple orders.
-        
-        Args:
-            account_id: Optional account filter
-            symbol: Optional symbol filter
-            timeout: Request timeout
-            idempotency_key: Idempotency key
-            
-        Returns:
-            List of cancelled orders
-        """
+    def to_params(self) -> Dict[str, Any]:
+        """Convert to request parameters."""
         params = {}
-        if account_id:
-            params["account_id"] = account_id
-        if symbol:
-            params["symbol"] = symbol
-        
-        response = await self._request(
-            "DELETE",
-            "/orders",
-            params=params,
-            timeout=timeout,
-            idempotency_key=idempotency_key,
-        )
-        return await self._parse_list_response(response, Order)
+        if self.account_id:
+            params["accountId"] = self.account_id
+        if self.symbol:
+            params["symbol"] = self.symbol
+        if self.status:
+            params["status"] = self.status.value
+        if self.side:
+            params["side"] = self.side.value
+        if self.order_type:
+            params["type"] = self.order_type.value
+        if self.from_date:
+            params["fromDate"] = int(self.from_date.timestamp())
+        if self.to_date:
+            params["toDate"] = int(self.to_date.timestamp())
+        if self.page:
+            params["page"] = self.page
+        if self.limit:
+            params["limit"] = self.limit
+        return params
+
+
+class OcoOrderRequest:
+    """One-Cancels-Other (OCO) order request."""
     
-    async def get_trades(
+    def __init__(
         self,
-        account_id: Optional[str] = None,
-        *,
-        symbol: Optional[str] = None,
-        order_id: Optional[str] = None,
-        limit: int = 100,
-        offset: int = 0,
-        timeout: Optional[float] = None,
-    ) -> PaginatedResponse:
-        """Get trade history.
+        account_id: str,
+        symbol: str,
+        volume: Decimal,
+        first_order_side: OrderSide,
+        first_order_price: Decimal,
+        second_order_side: OrderSide,
+        second_order_price: Decimal,
+        time_in_force: TimeInForce = TimeInForce.GTC,
+        comment: Optional[str] = None,
+    ):
+        """Initialize OCO order request."""
+        self.account_id = account_id
+        self.symbol = symbol
+        self.volume = volume
+        self.first_order_side = first_order_side
+        self.first_order_price = first_order_price
+        self.second_order_side = second_order_side
+        self.second_order_price = second_order_price
+        self.time_in_force = time_in_force
+        self.comment = comment
         
-        Args:
-            account_id: Optional account filter
-            symbol: Optional symbol filter
-            order_id: Optional order filter
-            limit: Maximum number of trades
-            offset: Pagination offset
-            timeout: Request timeout
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to request data."""
+        return {
+            "accountId": self.account_id,
+            "symbol": self.symbol,
+            "volume": str(self.volume),
+            "firstOrder": {
+                "side": self.first_order_side.value,
+                "price": str(self.first_order_price),
+            },
+            "secondOrder": {
+                "side": self.second_order_side.value,
+                "price": str(self.second_order_price),
+            },
+            "timeInForce": self.time_in_force.value,
+            "comment": self.comment,
+        }
+
+
+class BracketOrderRequest:
+    """Bracket order request (entry + stop loss + take profit)."""
+    
+    def __init__(
+        self,
+        account_id: str,
+        symbol: str,
+        side: OrderSide,
+        volume: Decimal,
+        entry_price: Decimal,
+        stop_loss_price: Decimal,
+        take_profit_price: Decimal,
+        time_in_force: TimeInForce = TimeInForce.GTC,
+        comment: Optional[str] = None,
+    ):
+        """Initialize bracket order request."""
+        self.account_id = account_id
+        self.symbol = symbol
+        self.side = side
+        self.volume = volume
+        self.entry_price = entry_price
+        self.stop_loss_price = stop_loss_price
+        self.take_profit_price = take_profit_price
+        self.time_in_force = time_in_force
+        self.comment = comment
+        
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to request data."""
+        return {
+            "accountId": self.account_id,
+            "symbol": self.symbol,
+            "side": self.side.value,
+            "volume": str(self.volume),
+            "entryPrice": str(self.entry_price),
+            "stopLossPrice": str(self.stop_loss_price),
+            "takeProfitPrice": str(self.take_profit_price),
+            "timeInForce": self.time_in_force.value,
+            "comment": self.comment,
+        }
+
+
+class OrderExecution:
+    """Order execution information."""
+    
+    def __init__(self, data: Dict[str, Any]):
+        """Initialize from API response data."""
+        self.execution_id: str = data["executionId"]
+        self.order_id: str = data["orderId"]
+        self.symbol: str = data["symbol"]
+        self.side: OrderSide = OrderSide(data["side"])
+        self.volume: Decimal = Decimal(str(data["volume"]))
+        self.price: Decimal = Decimal(str(data["price"]))
+        self.commission: Decimal = Decimal(str(data.get("commission", "0")))
+        self.swap: Decimal = Decimal(str(data.get("swap", "0")))
+        self.executed_at: datetime = datetime.fromtimestamp(data["executedAt"])
+
+
+class OrdersAPI:
+    """Orders REST API client."""
+    
+    def __init__(self, http_client: HTTPClient):
+        """Initialize with HTTP client."""
+        self.http = http_client
+        
+    async def place_order(self, order_request: OrderRequest) -> Order:
+        """Place a new order."""
+        data = {
+            "accountId": order_request.account_id,
+            "symbol": order_request.symbol,
+            "side": order_request.side.value,
+            "type": order_request.type.value,
+            "volume": str(order_request.volume),
+            "timeInForce": order_request.time_in_force.value,
+        }
+        
+        if order_request.price is not None:
+            data["price"] = str(order_request.price)
+        if order_request.stop_price is not None:
+            data["stopPrice"] = str(order_request.stop_price)
+        if order_request.client_order_id is not None:
+            data["clientOrderId"] = order_request.client_order_id
+        if order_request.comment is not None:
+            data["comment"] = order_request.comment
             
-        Returns:
-            Paginated list of trades
-        """
-        params = {"limit": limit, "offset": offset}
-        if account_id:
-            params["account_id"] = account_id
-        if symbol:
-            params["symbol"] = symbol
-        if order_id:
-            params["order_id"] = order_id
+        response = await self.http.post("/orders", data=data)
         
-        return await self._get_paginated("/trades", Trade, params=params, timeout=timeout)
-    
-    async def get_trade(
-        self,
-        trade_id: str,
-        *,
-        timeout: Optional[float] = None,
-    ) -> Trade:
-        """Get trade by ID.
-        
-        Args:
-            trade_id: Trade identifier
-            timeout: Request timeout
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to place order")
             
-        Returns:
-            Trade information
-        """
-        return await self._get_data(f"/trades/{trade_id}", Trade, timeout=timeout)
-    
-    async def get_order_fills(
-        self,
+        return Order(**response.data)
+        
+    async def get_orders(
+        self, 
+        query: Optional[OrderQuery] = None
+    ) -> Dict[str, Any]:
+        """Get orders with optional filtering."""
+        params = query.to_params() if query else {}
+        
+        response = await self.http.get("/orders", params=params)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve orders")
+            
+        orders = [Order(**order) for order in response.data.get("orders", [])]
+        
+        return {
+            "orders": orders,
+            "pagination": response.data.get("pagination")
+        }
+        
+    async def get_order(self, order_id: str) -> Order:
+        """Get order by ID."""
+        response = await self.http.get(f"/orders/{order_id}")
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve order")
+            
+        return Order(**response.data)
+        
+    async def modify_order(
+        self, 
         order_id: str,
-        *,
-        timeout: Optional[float] = None,
-    ) -> List[Trade]:
-        """Get fills for an order.
+        modification: OrderModification
+    ) -> Order:
+        """Modify an existing order."""
+        data = modification.to_dict()
         
-        Args:
-            order_id: Order identifier
-            timeout: Request timeout
+        response = await self.http.put(f"/orders/{order_id}", data=data)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to modify order")
             
-        Returns:
-            List of trades that filled the order
-        """
-        return await self._get_list(f"/orders/{order_id}/fills", Trade, timeout=timeout)
+        return Order(**response.data)
+        
+    async def cancel_order(self, order_id: str) -> Order:
+        """Cancel an order."""
+        response = await self.http.delete(f"/orders/{order_id}")
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to cancel order")
+            
+        return Order(**response.data)
+        
+    async def cancel_orders(
+        self, 
+        account_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> List[Order]:
+        """Cancel multiple orders."""
+        data = {}
+        if account_id:
+            data["accountId"] = account_id
+        if symbol:
+            data["symbol"] = symbol
+            
+        response = await self.http.post("/orders/cancel", data=data)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to cancel orders")
+            
+        return [Order(**order) for order in response.data]
+        
+    async def place_oco_order(self, oco_request: OcoOrderRequest) -> List[Order]:
+        """Place a One-Cancels-Other (OCO) order."""
+        data = oco_request.to_dict()
+        
+        response = await self.http.post("/orders/oco", data=data)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to place OCO order")
+            
+        return [Order(**order) for order in response.data]
+        
+    async def place_bracket_order(self, bracket_request: BracketOrderRequest) -> List[Order]:
+        """Place a bracket order (entry + stop loss + take profit)."""
+        data = bracket_request.to_dict()
+        
+        response = await self.http.post("/orders/bracket", data=data)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to place bracket order")
+            
+        return [Order(**order) for order in response.data]
+        
+    async def get_order_history(
+        self,
+        query: Optional[OrderQuery] = None
+    ) -> Dict[str, Any]:
+        """Get order history."""
+        params = query.to_params() if query else {}
+        
+        response = await self.http.get("/orders/history", params=params)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve order history")
+            
+        orders = [Order(**order) for order in response.data.get("orders", [])]
+        
+        return {
+            "orders": orders,
+            "pagination": response.data.get("pagination")
+        }
+        
+    async def get_order_executions(self, order_id: str) -> List[OrderExecution]:
+        """Get order execution details."""
+        response = await self.http.get(f"/orders/{order_id}/executions")
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to retrieve order executions")
+            
+        return [OrderExecution(exec_data) for exec_data in response.data]
+        
+    async def estimate_order_cost(self, order_request: OrderRequest) -> Dict[str, Any]:
+        """Estimate order cost and margin requirements."""
+        data = {
+            "accountId": order_request.account_id,
+            "symbol": order_request.symbol,
+            "side": order_request.side.value,
+            "type": order_request.type.value,
+            "volume": str(order_request.volume),
+        }
+        
+        if order_request.price is not None:
+            data["price"] = str(order_request.price)
+            
+        response = await self.http.post("/orders/estimate", data=data)
+        
+        if not response.success or not response.data:
+            raise ValidationError(response.message or "Failed to estimate order cost")
+            
+        return response.data
