@@ -34,7 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `close_position`, `flatten`, `account_is_flat`, `resolve_account`,
   `resolve_symbol`, `discover_symbols`, `order_code`
 - `DXTradeTransport.wait_for_channel()` — wait for a WebSocket channel to connect
-- Example scripts: `examples/stream_quotes.py`, `examples/trade_smoke.py`
+- `dxtrade.capture.Capture` class — high-level API for streaming quotes,
+  placing orders, and capturing data to CSV + Polars DataFrame
+- `dxtrade.capture.QuoteStore` — append-only CSV store with incremental
+  Polars DataFrame for quote capture
+- Example scripts: `examples/stream_quotes.py`, `examples/trade_smoke.py`,
+  `examples/stream_quotes_store.py`, and `examples/capture_example.py`
+  (captures quotes to append-only CSV plus an incremental Polars DataFrame;
+  requires the `capture` extra, `pip install -e ".[capture]"`)
 - `env_config.py` now reads the documented `DXTRADE_WS_MARKET_DATA_URL` and
   `DXTRADE_WS_PORTFOLIO_URL` variables
 

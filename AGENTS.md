@@ -49,6 +49,8 @@ src/dxtrade/
 examples/
   stream_market_data.py   # Authenticate + stream quotes via transport layer
   stream_quotes.py        # Stream quotes via dxtrade.utils.stream_quotes (--symbols/--duration)
+  stream_quotes_store.py  # Capture quotes to append-only CSV + Polars DataFrame (needs polars)
+  capture_example.py      # High-level Capture class demo (subscribe, trade, query data)
   trade_smoke.py          # Open/close a small position via utils (--stop-loss, --dry-run)
   bridge_example.py       # Bridge pattern: forward WS data to a message queue
   README.md               # Example docs
@@ -194,6 +196,32 @@ DXTrade broker:
 
 Note: closing orders and the utils' stop placement omit `quantity` (full close).
 Protective stops auto-cancel on the platform when their position closes.
+
+### Capture class (`capture.py`)
+
+High-level class for streaming quotes and managing positions. Provides a unified API for:
+
+- **Streaming:** `subscribe()` / `unsubscribe()` — control quote streaming with automatic symbol resolution.
+- **Trading:** `place_order()` / `close_position()` / `flatten()` / `get_positions()` / `get_orders()` — delegate to `utils` helpers.
+- **Data capture:** `get_dataframe()` / `last_prices()` / `to_parquet()` / `to_csv()` — query captured quotes.
+- **Context manager:** `async with Capture(...) as cap:` — automatic connect/close lifecycle.
+
+Usage:
+```python
+from dxtrade import Capture
+
+async with Capture(
+    symbols=["CL", "NATGAS", "XAU"],
+    data_dir="data/quotes",
+    write_parquet=True,
+) as cap:
+    await cap.subscribe()
+    await asyncio.sleep(60)
+    print(cap.last_prices())
+    cap.to_parquet("snapshot.parquet")
+```
+
+Polars is optional — install with `pip install -e ".[capture]"`. The core SDK works without it.
 
 ### High-level SDK layer (broken in the current tree — see Known Issues)
 
