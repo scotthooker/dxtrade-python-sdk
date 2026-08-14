@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   placing orders, and capturing data to CSV + Polars DataFrame
 - `dxtrade.capture.QuoteStore` — append-only CSV store with incremental
   Polars DataFrame for quote capture
+- `QuoteStore.to_ohlcv()` / `Capture.get_ohlcv()` — convert quote data to
+  OHLCV bars with configurable timeframes (1m, 5m, 15m, 1h, 4h, 1d)
 - Example scripts: `examples/stream_quotes.py`, `examples/trade_smoke.py`,
   `examples/stream_quotes_store.py`, and `examples/capture_example.py`
   (captures quotes to append-only CSV plus an incremental Polars DataFrame;

@@ -144,6 +144,132 @@ class QuoteStore:
         pl_path = Path(path)
         self._df.write_csv(pl_path)
 
+    def to_ohlcv(
+        self,
+        timeframe: str = "1m",
+        use_mid: bool = False,
+    ) -> Any:
+        """Convert quote data to OHLCV bars.
+
+        Args:
+            timeframe: Bar interval (e.g. "1m", "5m", "15m", "1h", "4h", "1d").
+            use_mid: If True, use mid price (bid+ask)/2 instead of bid/ask.
+
+        Returns:
+            Polars DataFrame with columns:
+            symbol, timestamp, open, high, low, close, volume, bid_open, bid_high,
+            bid_low, bid_close, ask_open, ask_high, ask_low, ask_close, bar_count
+        """
+        _import_polars()
+        import polars as pl
+
+        if self._df is None or self._df.height == 0:
+            return pl.DataFrame(
+                schema={
+                    "symbol": pl.Utf8,
+                    "timestamp": pl.Datetime,
+                    "open": pl.Float64,
+                    "high": pl.Float64,
+                    "low": pl.Float64,
+                    "close": pl.Float64,
+                    "volume": pl.UInt32,
+                    "bid_open": pl.Float64,
+                    "bid_high": pl.Float64,
+                    "bid_low": pl.Float64,
+                    "bid_close": pl.Float64,
+                    "ask_open": pl.Float64,
+                    "ask_high": pl.Float64,
+                    "ask_low": pl.Float64,
+                    "ask_close": pl.Float64,
+                    "bar_count": pl.UInt32,
+                }
+            )
+
+        # Parse timeframe
+        interval = _parse_timeframe(timeframe)
+
+        # Convert time column to datetime
+        df = self._df.with_columns(
+            pl.col("time")
+            .str.to_datetime(
+                format="%Y-%m-%dT%H:%M:%S.%fZ",
+                time_zone="UTC",
+            )
+            .alias("timestamp")
+        )
+
+        # Filter to rows with valid bid/ask
+        df = df.filter(pl.col("bid").is_not_null() & pl.col("ask").is_not_null())
+
+        if df.height == 0:
+            return self.empty_ohlcv_df()
+
+        # Convert bid/ask to numeric
+        df = df.with_columns(
+            pl.col("bid").cast(pl.Float64),
+            pl.col("ask").cast(pl.Float64),
+        )
+
+        # Use mid price if requested
+        if use_mid:
+            df = df.with_columns(((pl.col("bid") + pl.col("ask")) / 2).alias("price"))
+        else:
+            # Use bid for OHLC (standard for forex/CFD data)
+            df = df.with_columns(pl.col("bid").alias("price"))
+
+        # Group by symbol and time bucket
+        ohlcv = (
+            df.group_by_dynamic("timestamp", every=interval, group_by="symbol")
+            .agg(
+                pl.col("price").first().alias("open"),
+                pl.col("price").max().alias("high"),
+                pl.col("price").min().alias("low"),
+                pl.col("price").last().alias("close"),
+                pl.len().alias("volume"),
+                # Bid OHLC
+                pl.col("bid").first().alias("bid_open"),
+                pl.col("bid").max().alias("bid_high"),
+                pl.col("bid").min().alias("bid_low"),
+                pl.col("bid").last().alias("bid_close"),
+                # Ask OHLC
+                pl.col("ask").first().alias("ask_open"),
+                pl.col("ask").max().alias("ask_high"),
+                pl.col("ask").min().alias("ask_low"),
+                pl.col("ask").last().alias("ask_close"),
+                # Number of quotes in bar
+                pl.len().alias("bar_count"),
+            )
+            .sort(["symbol", "timestamp"])
+        )
+
+        return ohlcv
+
+    def empty_ohlcv_df(self) -> Any:
+        """Return an empty OHLCV DataFrame with the correct schema."""
+        _import_polars()
+        import polars as pl
+
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.Utf8,
+                "timestamp": pl.Datetime,
+                "open": pl.Float64,
+                "high": pl.Float64,
+                "low": pl.Float64,
+                "close": pl.Float64,
+                "volume": pl.UInt32,
+                "bid_open": pl.Float64,
+                "bid_high": pl.Float64,
+                "bid_low": pl.Float64,
+                "bid_close": pl.Float64,
+                "ask_open": pl.Float64,
+                "ask_high": pl.Float64,
+                "ask_low": pl.Float64,
+                "ask_close": pl.Float64,
+                "bar_count": pl.UInt32,
+            }
+        )
+
 
 def _import_polars() -> None:
     """Lazy import polars with helpful error message."""
@@ -154,6 +280,34 @@ def _import_polars() -> None:
             "Polars is required for data operations. "
             "Install with: pip install -e '.[capture]'"
         ) from err
+
+
+def _parse_timeframe(timeframe: str) -> str:
+    """Convert a timeframe string to a polars-compatible interval.
+
+    Args:
+        timeframe: Timeframe string (e.g. "1m", "5m", "15m", "1h", "4h", "1d").
+
+    Returns:
+        Polars interval string (e.g. "1m", "5m", "1h", "4h", "1d").
+    """
+    # Polars supports: ns, us, ms, s, m, h, d, w
+    # Map common trading timeframes
+    valid_suffixes = {"s": "s", "m": "m", "h": "h", "d": "d", "w": "w"}
+
+    if not timeframe:
+        return "1m"
+
+    suffix = timeframe[-1].lower()
+    if suffix in valid_suffixes:
+        return timeframe.lower()
+
+    # Try to parse numeric-only as minutes
+    if timeframe.isdigit():
+        return f"{timeframe}m"
+
+    # Default to 1 minute
+    return "1m"
 
 
 class Capture:
@@ -366,3 +520,24 @@ class Capture:
         if not self.store:
             raise RuntimeError("Call connect() first")
         self.store.append(event)
+
+    def get_ohlcv(
+        self,
+        timeframe: str = "1m",
+        use_mid: bool = False,
+    ) -> Any:
+        """Convert captured quote data to OHLCV bars.
+
+        Args:
+            timeframe: Bar interval (e.g. "1m", "5m", "15m", "1h", "4h", "1d").
+            use_mid: If True, use mid price (bid+ask)/2 for OHLC instead of bid.
+
+        Returns:
+            Polars DataFrame with OHLCV bars per symbol.
+            Columns: symbol, timestamp, open, high, low, close, volume,
+                     bid_open, bid_high, bid_low, bid_close,
+                     ask_open, ask_high, ask_low, ask_close, bar_count
+        """
+        if not self.store:
+            raise RuntimeError("Call connect() first")
+        return self.store.to_ohlcv(timeframe=timeframe, use_mid=use_mid)

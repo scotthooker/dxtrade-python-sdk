@@ -204,6 +204,7 @@ High-level class for streaming quotes and managing positions. Provides a unified
 - **Streaming:** `subscribe()` / `unsubscribe()` — control quote streaming with automatic symbol resolution.
 - **Trading:** `place_order()` / `close_position()` / `flatten()` / `get_positions()` / `get_orders()` — delegate to `utils` helpers.
 - **Data capture:** `get_dataframe()` / `last_prices()` / `to_parquet()` / `to_csv()` — query captured quotes.
+- **OHLCV bars:** `get_ohlcv(timeframe="1m")` — convert quotes to OHLCV bars (1m, 5m, 15m, 1h, 4h, 1d).
 - **Context manager:** `async with Capture(...) as cap:` — automatic connect/close lifecycle.
 
 Usage:
@@ -217,8 +218,13 @@ async with Capture(
 ) as cap:
     await cap.subscribe()
     await asyncio.sleep(60)
-    print(cap.last_prices())
-    cap.to_parquet("snapshot.parquet")
+    
+    # Get OHLCV bars (1-minute)
+    ohlcv = cap.get_ohlcv(timeframe="1m")
+    print(ohlcv)
+    
+    # Get OHLCV bars (5-minute, using mid price)
+    ohlcv_5m = cap.get_ohlcv(timeframe="5m", use_mid=True)
 ```
 
 Polars is optional — install with `pip install -e ".[capture]"`. The core SDK works without it.

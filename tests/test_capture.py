@@ -221,3 +221,114 @@ def test_quote_store_to_csv():
         csv_path = Path(tmpdir) / "test.csv"
         store.to_csv(csv_path)
         assert csv_path.exists()
+
+
+def test_quote_store_ohlcv_conversion():
+    """Test that QuoteStore.to_ohlcv() converts quotes to OHLCV bars."""
+    from dxtrade.capture import QuoteStore
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = QuoteStore(tmpdir)
+
+        # Add multiple quotes over a time range
+        base_time = "2026-08-14T12:00:"
+        for i in range(5):
+            store.append(
+                {
+                    "symbol": "CL",
+                    "bid": 75.0 + i * 0.1,
+                    "ask": 75.1 + i * 0.1,
+                    "type": "Quote",
+                    "time": f"{base_time}{i:02d}.000Z",
+                }
+            )
+        store.flush()
+
+        ohlcv = store.to_ohlcv(timeframe="1m")
+        assert ohlcv.height > 0
+        assert "symbol" in ohlcv.columns
+        assert "open" in ohlcv.columns
+        assert "high" in ohlcv.columns
+        assert "low" in ohlcv.columns
+        assert "close" in ohlcv.columns
+        assert "bar_count" in ohlcv.columns
+
+
+def test_quote_store_ohlcv_empty():
+    """Test that to_ohlcv() returns empty DataFrame when no data."""
+    from dxtrade.capture import QuoteStore
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = QuoteStore(tmpdir)
+        ohlcv = store.to_ohlcv(timeframe="1m")
+        assert ohlcv.height == 0
+        assert "symbol" in ohlcv.columns
+
+
+def test_quote_store_ohlcv_timeframes():
+    """Test OHLCV conversion with different timeframes."""
+    from dxtrade.capture import QuoteStore
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = QuoteStore(tmpdir)
+
+        # Add quotes over multiple minutes
+        for minute in range(3):
+            for sec in range(2):
+                store.append(
+                    {
+                        "symbol": "CL",
+                        "bid": 75.0 + minute * 0.1 + sec * 0.01,
+                        "ask": 75.1 + minute * 0.1 + sec * 0.01,
+                        "type": "Quote",
+                        "time": f"2026-08-14T12:{minute:02d}:{sec:02d}.000Z",
+                    }
+                )
+        store.flush()
+
+        # Test 1-minute bars
+        ohlcv_1m = store.to_ohlcv(timeframe="1m")
+        assert ohlcv_1m.height >= 1
+
+        # Test 5-minute bars
+        ohlcv_5m = store.to_ohlcv(timeframe="5m")
+        assert ohlcv_5m.height >= 1
+
+
+def test_capture_get_ohlcv():
+    """Test that Capture.get_ohlcv() delegates to store."""
+    from dxtrade.capture import Capture
+    from dxtrade.capture import QuoteStore
+
+    cap = Capture(data_dir=tempfile.gettempdir())
+    cap.store = QuoteStore(tempfile.gettempdir())
+    cap.store.append(
+        {
+            "symbol": "CL",
+            "bid": 75.5,
+            "ask": 75.6,
+            "type": "Quote",
+            "time": "2026-08-14T12:00:00.000Z",
+        }
+    )
+    cap.store.flush()
+
+    ohlcv = cap.get_ohlcv(timeframe="1m")
+    # With 1 quote, OHLCV creates 1 bar (open=high=low=close)
+    assert ohlcv.height == 1
+    assert ohlcv["open"][0] == 75.5
+    assert ohlcv["close"][0] == 75.5
+
+
+def test_parse_timeframe():
+    """Test timeframe parsing."""
+    from dxtrade.capture import _parse_timeframe
+
+    assert _parse_timeframe("1m") == "1m"
+    assert _parse_timeframe("5m") == "5m"
+    assert _parse_timeframe("1h") == "1h"
+    assert _parse_timeframe("4h") == "4h"
+    assert _parse_timeframe("1d") == "1d"
+    assert _parse_timeframe("60") == "60m"  # Numeric-only treated as minutes
+    assert _parse_timeframe("") == "1m"  # Empty defaults to 1m
+    assert _parse_timeframe(None) == "1m"  # None defaults to 1m
