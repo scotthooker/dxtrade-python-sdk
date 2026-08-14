@@ -27,7 +27,7 @@ from dxtrade.models import SessionCredentials
 
 class AuthHandler(ABC):
     """Base class for authentication handlers."""
-    
+
     def __init__(self, credentials: AnyCredentials) -> None:
         """Initialize auth handler.
         
@@ -63,10 +63,32 @@ class AuthHandler(ABC):
             Authentication type
         """
 
+    def get_auth_headers(
+        self,
+        method: str = "",
+        path: str = "",
+        body: str = "",
+    ) -> Dict[str, str]:
+        """Return authentication headers for an outgoing request.
+
+        Transport layers use this to attach the handler's authentication
+        scheme without depending on a specific HTTP client. Subclasses
+        override this to provide their own header conventions.
+
+        Args:
+            method: HTTP method (used by signature-based schemes)
+            path: Request path including query (used by signature-based schemes)
+            body: Raw request body (used by signature-based schemes)
+
+        Returns:
+            Headers to add to the request
+        """
+        return {}
+
 
 class BearerTokenHandler(AuthHandler):
     """Bearer token authentication handler."""
-    
+
     def __init__(self, credentials: BearerTokenCredentials) -> None:
         """Initialize bearer token handler.
         
@@ -97,6 +119,24 @@ class BearerTokenHandler(AuthHandler):
         request.headers["Authorization"] = f"Bearer {self.credentials.token}"
         return request
 
+    def get_auth_headers(
+        self,
+        method: str = "",
+        path: str = "",
+        body: str = "",
+    ) -> Dict[str, str]:
+        """Return authentication headers for an outgoing request.
+
+        Args:
+            method: HTTP method (unused for bearer token)
+            path: Request path (unused for bearer token)
+            body: Raw request body (unused for bearer token)
+
+        Returns:
+            Headers to add to the request
+        """
+        return {"Authorization": f"Bearer {self.credentials.token}"}
+
     def get_auth_type(self) -> AuthType:
         """Get the authentication type.
         
@@ -108,7 +148,7 @@ class BearerTokenHandler(AuthHandler):
 
 class HMACHandler(AuthHandler):
     """HMAC authentication handler."""
-    
+
     def __init__(self, credentials: HMACCredentials) -> None:
         """Initialize HMAC handler.
         
@@ -137,22 +177,43 @@ class HMACHandler(AuthHandler):
             Authenticated request
         """
         timestamp = str(int(time.time() * 1000))
-        
+
         # Prepare signature components
         method = request.method.upper()
         path = str(request.url.path)
         if request.url.query:
             path += f"?{request.url.query}"
-        
+
         body = ""
         if request.content:
             body = request.content.decode("utf-8")
-        
+
+        request.headers.update(self.get_auth_headers(method=method, path=path, body=body))
+        return request
+
+    def get_auth_headers(
+        self,
+        method: str = "",
+        path: str = "",
+        body: str = "",
+    ) -> Dict[str, str]:
+        """Return authentication headers for an outgoing request.
+
+        Args:
+            method: HTTP method
+            path: Request path including query
+            body: Raw request body
+
+        Returns:
+            Headers to add to the request
+        """
+        timestamp = str(int(time.time() * 1000))
+
         # Create signature string
-        signature_string = f"{timestamp}{method}{path}{body}"
+        signature_string = f"{timestamp}{method.upper()}{path}{body}"
         if self.credentials.passphrase:
             signature_string += self.credentials.passphrase
-        
+
         # Generate HMAC signature
         signature = hmac.new(
             self.credentials.secret_key.encode("utf-8"),
@@ -160,16 +221,18 @@ class HMACHandler(AuthHandler):
             hashlib.sha256,
         ).digest()
         signature_b64 = b64encode(signature).decode("utf-8")
-        
+
         # Add authentication headers
-        request.headers["DX-API-KEY"] = self.credentials.api_key
-        request.headers["DX-API-TIMESTAMP"] = timestamp
-        request.headers["DX-API-SIGNATURE"] = signature_b64
-        
+        headers = {
+            "DX-API-KEY": self.credentials.api_key,
+            "DX-API-TIMESTAMP": timestamp,
+            "DX-API-SIGNATURE": signature_b64,
+        }
+
         if self.credentials.passphrase:
-            request.headers["DX-API-PASSPHRASE"] = self.credentials.passphrase
-        
-        return request
+            headers["DX-API-PASSPHRASE"] = self.credentials.passphrase
+
+        return headers
 
     def get_auth_type(self) -> AuthType:
         """Get the authentication type.
@@ -182,7 +245,7 @@ class HMACHandler(AuthHandler):
 
 class SessionHandler(AuthHandler):
     """Session-based authentication handler."""
-    
+
     def __init__(self, credentials: SessionCredentials) -> None:
         """Initialize session handler.
         
@@ -220,13 +283,12 @@ class SessionHandler(AuthHandler):
         # Check if we need to get/refresh session token
         if not self._session_token or self._is_token_expired():
             await self._refresh_session_token(client)
-        
+
         if not self._session_token:
             raise DXtradeAuthenticationError("Failed to obtain session token")
-        
-        # Add both X-Auth-Token and Authorization headers as shown in the example
-        request.headers["X-Auth-Token"] = self._session_token
-        request.headers["Authorization"] = f"DXAPI {self._session_token}"
+
+        # Both X-Auth-Token and Authorization headers are required by DXTrade
+        request.headers.update(self.get_auth_headers())
         return request
 
     async def _refresh_session_token(self, client: httpx.AsyncClient) -> None:
@@ -244,28 +306,28 @@ class SessionHandler(AuthHandler):
                 "password": self.credentials.password,
                 "domain": self.credentials.domain or "default",
             }
-            
+
             # Use /login endpoint as per the integration guide
             response = await client.post("/login", json=login_data)
             response.raise_for_status()
-            
+
             data = response.json()
-            
+
             # Get sessionToken from response (as per integration guide)
             self._session_token = data.get("sessionToken")
-            
+
             if not self._session_token:
                 error_msg = data.get("message") or "Login failed - no session token received"
                 raise DXtradeAuthenticationError(error_msg)
-            
+
             # Store expiration time if provided, otherwise default to 1 hour
             expires_in = data.get("expiresIn", 3600)
             self._token_expires_at = time.time() + expires_in - 300  # With 5 min buffer
             self._last_login = time.time()
-            
+
             # Store accounts for reference
             self.accounts = data.get("accounts", [])
-                
+
         except httpx.HTTPError as e:
             raise DXtradeAuthenticationError(f"Login request failed: {e}") from e
 
@@ -277,11 +339,11 @@ class SessionHandler(AuthHandler):
         """
         if not self._token_expires_at or not self._last_login:
             return True
-        
+
         # Re-login if session is older than 1 hour (as per example)
         if (time.time() - self._last_login) > 3600:
             return True
-            
+
         return time.time() >= self._token_expires_at
 
     def get_auth_type(self) -> AuthType:
@@ -291,7 +353,33 @@ class SessionHandler(AuthHandler):
             Session auth type
         """
         return AuthType.SESSION
-    
+
+    def get_auth_headers(
+        self,
+        method: str = "",
+        path: str = "",
+        body: str = "",
+    ) -> Dict[str, str]:
+        """Return authentication headers for an outgoing request.
+
+        The DXTrade API requires the session token in both the
+        ``X-Auth-Token`` and ``Authorization: DXAPI <token>`` headers.
+
+        Args:
+            method: HTTP method (unused for session auth)
+            path: Request path (unused for session auth)
+            body: Raw request body (unused for session auth)
+
+        Returns:
+            Headers to add to the request
+        """
+        if not self._session_token:
+            return {}
+        return {
+            "X-Auth-Token": self._session_token,
+            "Authorization": f"DXAPI {self._session_token}",
+        }
+
     def get_session_token(self) -> Optional[str]:
         """Get the current session token.
         
@@ -308,7 +396,7 @@ class SessionHandler(AuthHandler):
         """
         if not self._session_token:
             return
-        
+
         try:
             # Try to invalidate token on server (as per integration guide)
             headers = {
@@ -328,7 +416,7 @@ class SessionHandler(AuthHandler):
 
 class AuthFactory:
     """Factory for creating authentication handlers."""
-    
+
     _handlers: Dict[AuthType, type[AuthHandler]] = {
         AuthType.BEARER_TOKEN: BearerTokenHandler,
         AuthType.HMAC: HMACHandler,
@@ -356,7 +444,7 @@ class AuthFactory:
         handler_class = self._handlers.get(auth_type)
         if not handler_class:
             raise DXtradeConfigurationError(f"Unsupported auth type: {auth_type}")
-        
+
         return handler_class(credentials)
 
     @classmethod

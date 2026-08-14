@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Declared the undeclared `httpx` runtime dependency in `pyproject.toml`
+- REST requests now attach the broker's auth headers via the auth handler
+  (`Authorization: DXAPI <token>` plus `X-Auth-Token` for session auth),
+  fixing authenticated requests against DXTrade brokers such as Velotrade
+- Portfolio subscription now uses the DXTrade Push API payload shape
+  (`requestType: "LIST"` + `accounts: [...]`); the previous shape is
+  rejected by the server (`errorCode 32`)
+- `send_message()` no longer reads from the socket (the background message
+  handler owns `recv`), fixing a `websockets.ConcurrencyError` on send
+- Push subscription messages now carry the spec-required `timestamp` field
+- Ping stats are stored per channel even before a full connection cycle,
+  fixing lost counters
+
+### Added
+- `AuthHandler.get_auth_headers()` — transport-agnostic auth header builder
+  implemented by `SessionHandler`, `BearerTokenHandler`, and `HMACHandler`
+- Transport REST methods matching the official DXTrade OpenAPI spec:
+  `get_users`, `get_account_metrics`, `get_account_portfolio`,
+  `get_account_positions`, `get_account_orders`, `get_account_orders_history`,
+  `query_instruments`, `get_market_data`, `place_order`, `cancel_order`,
+  `ping`, `logout`, and `_encode_account` for percent-encoding account codes
+- `dxtrade.utils` — high-level helpers for streaming and trading:
+  `stream_quotes`, `open_position` (with protective stop loss),
+  `close_position`, `flatten`, `account_is_flat`, `resolve_account`,
+  `resolve_symbol`, `discover_symbols`, `order_code`
+- `DXTradeTransport.wait_for_channel()` — wait for a WebSocket channel to connect
+- Example scripts: `examples/stream_quotes.py`, `examples/trade_smoke.py`
+- `env_config.py` now reads the documented `DXTRADE_WS_MARKET_DATA_URL` and
+  `DXTRADE_WS_PORTFOLIO_URL` variables
+
+### Fixed
+- WebSocket URL fallback builders no longer inject a wrong `/ws` path segment
+  (`get_market_data_url`/`get_portfolio_url`), and `subscribe()` resolves URLs
+  through them
+
 ## [1.0.0] - 2025-01-06
 
 ### Added

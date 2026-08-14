@@ -33,7 +33,7 @@ class Features:
     auto_reconnect: bool = True
     rate_limiting: bool = True
     automatic_retry: bool = True
-    
+
     def to_dict(self) -> Dict[str, bool]:
         """Convert features to dictionary."""
         return {
@@ -52,49 +52,49 @@ class Endpoints:
     login: str = '/login'
     logout: str = '/logout'
     refresh_token: str = '/refresh'
-    
+
     # Market data endpoints
     market_data: str = '/marketdata'
     quotes: str = '/quotes'
     candles: str = '/candles'
     instruments: str = '/instruments'
-    
+
     # Account endpoints
     account: str = '/account'
     accounts: str = '/accounts'
     portfolio: str = '/portfolio'
     balance: str = '/balance'
     metrics: str = '/accounts/metrics'
-    
+
     # Trading endpoints
     orders: str = '/orders'
     orders_history: str = '/accounts/orders/history'
     positions: str = '/accounts/positions'
     trades: str = '/trades'
     history: str = '/history'
-    
+
     # System endpoints
     time: str = '/time'
     status: str = '/status'
     version: str = '/version'
     conversion_rates: str = '/conversionRates'
-    
+
     # WebSocket endpoints (legacy paths)
     ws_market_data: str = '/md'
     ws_portfolio: str = '/'
-    
+
     def get_endpoint(self, name: str, base_url: Optional[str] = None) -> str:
         """Get endpoint by name with fallback."""
         endpoint = getattr(self, name, f'/{name}')
-        
+
         # If it's already a complete URL, return as-is
         if endpoint.startswith(('http://', 'https://')):
             return endpoint
-        
+
         # If we have a base URL, construct the full URL
         if base_url:
             return f"{base_url.rstrip('/')}{endpoint if endpoint.startswith('/') else '/' + endpoint}"
-        
+
         # Return the path/endpoint as-is
         return endpoint
 
@@ -105,7 +105,7 @@ class WebSocketConfig:
     # Explicit URLs (preferred)
     market_data_url: Optional[str] = None
     portfolio_url: Optional[str] = None
-    
+
     # Legacy configuration (fallback)
     base_url: Optional[str] = None
     market_data_path: str = '/md'
@@ -115,17 +115,17 @@ class WebSocketConfig:
     reconnect_attempts: int = 5
     reconnect_delay: float = 1.0  # seconds
     max_message_size: int = 1024 * 1024  # 1MB
-    
+
     def get_market_data_url(self, base_url: Optional[str] = None) -> str:
         """Get complete market data WebSocket URL."""
         # Use explicit URL if available
         if self.market_data_url:
             return self.market_data_url
-        
+
         # Fallback to constructing URL from base + path
         if not base_url and not self.base_url:
             raise ValueError("No market data WebSocket URL available")
-        
+
         ws_base = self.base_url or base_url.replace('https://', 'wss://').replace('http://', 'ws://')
         # Ensure path has format parameter
         path = self.market_data_path
@@ -133,18 +133,18 @@ class WebSocketConfig:
             path = f"{path}?format={self.format}"
         elif 'format=' not in path:
             path = f"{path}&format={self.format}"
-        return f"{ws_base}/ws{path}"
-    
+        return f"{ws_base}{path}"
+
     def get_portfolio_url(self, base_url: Optional[str] = None) -> str:
         """Get complete portfolio WebSocket URL."""
         # Use explicit URL if available
         if self.portfolio_url:
             return self.portfolio_url
-        
+
         # Fallback to constructing URL from base + path
         if not base_url and not self.base_url:
             raise ValueError("No portfolio WebSocket URL available")
-        
+
         ws_base = self.base_url or base_url.replace('https://', 'wss://').replace('http://', 'ws://')
         # Ensure path has format parameter
         path = self.portfolio_path
@@ -152,7 +152,7 @@ class WebSocketConfig:
             path = f"{path}?format={self.format}"
         elif 'format=' not in path:
             path = f"{path}&format={self.format}"
-        return f"{ws_base}/ws{path}"
+        return f"{ws_base}{path}"
 
 
 @dataclass
@@ -186,25 +186,25 @@ class RetryConfig:
 class AuthConfig:
     """Authentication configuration."""
     type: AuthType
-    
+
     # Credentials auth
     username: Optional[str] = None
     password: Optional[str] = None
     domain: str = 'default'
-    
+
     # Session auth
     session_token: Optional[str] = None
     auto_refresh: bool = True
     refresh_before_expiry: int = 300  # seconds
-    
+
     # Bearer auth
     bearer_token: Optional[str] = None
-    
+
     # HMAC auth
     api_key: Optional[str] = None
     api_secret: Optional[str] = None
     passphrase: Optional[str] = None
-    
+
     def validate(self) -> None:
         """Validate authentication configuration."""
         if self.type == AuthType.CREDENTIALS:
@@ -229,49 +229,49 @@ class SDKConfig:
     base_url: Optional[str] = None
     timeout: int = 30000  # milliseconds
     user_agent: str = 'dxtrade-python-sdk/2.0.0'
-    
+
     # Authentication
     auth: AuthConfig = field(default_factory=lambda: AuthConfig(type=AuthType.CREDENTIALS))
-    
+
     # Features
     features: Features = field(default_factory=Features)
-    
+
     # Endpoints
     endpoints: Endpoints = field(default_factory=Endpoints)
-    
+
     # WebSocket
     websocket: Optional[WebSocketConfig] = field(default_factory=WebSocketConfig)
-    
+
     # Rate limiting
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
-    
+
     # Retry behavior
     retry: RetryConfig = field(default_factory=RetryConfig)
-    
+
     # Logging
     log_level: str = 'INFO'
     log_requests: bool = False
     log_responses: bool = False
-    
+
     # Account configuration
     account: Optional[str] = None
-    
+
     def validate(self) -> None:
         """Validate the complete configuration."""
         if not self.base_url:
             raise ValueError("base_url is required")
-        
+
         if not self.base_url.startswith(('http://', 'https://')):
             raise ValueError("base_url must start with http:// or https://")
-        
+
         self.auth.validate()
-        
+
         if self.timeout <= 0:
             raise ValueError("timeout must be positive")
-        
+
         if self.features.websocket and not self.websocket:
             self.websocket = WebSocketConfig()
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
         return {
@@ -288,21 +288,21 @@ class SDKConfig:
             'features': self.features.to_dict(),
             'log_level': self.log_level,
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'SDKConfig':
         """Create configuration from dictionary."""
         config = cls()
-        
+
         if 'environment' in data:
             config.environment = Environment(data['environment'])
-        
+
         if 'base_url' in data:
             config.base_url = data['base_url']
-        
+
         if 'timeout' in data:
             config.timeout = data['timeout']
-        
+
         if 'auth' in data:
             auth_data = data['auth']
             auth_type = AuthType(auth_data.get('type', 'credentials'))
@@ -317,16 +317,16 @@ class SDKConfig:
                 api_secret=auth_data.get('api_secret'),
                 passphrase=auth_data.get('passphrase')
             )
-        
+
         if 'features' in data:
             config.features = Features(**data['features'])
-        
+
         if 'endpoints' in data:
             config.endpoints = Endpoints(**data['endpoints'])
-        
+
         if 'websocket' in data:
             config.websocket = WebSocketConfig(**data['websocket'])
-        
+
         return config
 
 
