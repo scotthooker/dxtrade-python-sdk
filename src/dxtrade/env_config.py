@@ -240,6 +240,13 @@ def _load_websocket_from_env() -> WebSocketConfig:
     if ws_url := os.getenv('DXTRADE_WS_URL'):
         ws_config.base_url = ws_url.rstrip('/')
     
+    # Explicit per-channel URLs take precedence over base + path
+    if market_data_url := os.getenv('DXTRADE_WS_MARKET_DATA_URL'):
+        ws_config.market_data_url = market_data_url
+    
+    if portfolio_url := os.getenv('DXTRADE_WS_PORTFOLIO_URL'):
+        ws_config.portfolio_url = portfolio_url
+    
     if market_data_path := os.getenv('DXTRADE_WS_MARKET_DATA_PATH'):
         ws_config.market_data_path = market_data_path
     

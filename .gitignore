@@ -156,8 +156,6 @@ test-outputs/
 CLAUDE.md
 
 # Test files
-test_*.py
-*_test.py
 CONFIRMATION.md
 
 # Development files

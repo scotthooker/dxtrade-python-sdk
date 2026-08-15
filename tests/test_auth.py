@@ -52,6 +52,12 @@ class TestBearerTokenHandler:
         # Verify authentication header was added
         assert authenticated_request.headers["Authorization"] == "Bearer test_bearer_token"
         assert authenticated_request == request  # Same request object should be returned
+    
+    def test_get_auth_headers(self, bearer_token_credentials):
+        """Test transport-agnostic auth headers."""
+        handler = BearerTokenHandler(bearer_token_credentials)
+        headers = handler.get_auth_headers()
+        assert headers == {"Authorization": "Bearer test_bearer_token"}
 
 
 class TestHMACHandler:
@@ -169,7 +175,45 @@ class TestHMACHandler:
         assert authenticated_request.headers["DX-API-SIGNATURE"] == expected_signature_b64
 
 
-class TestSessionHandler:
+class TestHMACGetAuthHeaders:
+    """Test transport-agnostic HMAC auth headers."""
+
+    def test_get_auth_headers_with_passphrase(self, hmac_credentials):
+        """Test auth headers include signature and passphrase."""
+        handler = HMACHandler(hmac_credentials)
+        headers = handler.get_auth_headers(method="GET", path="/api/accounts", body="")
+
+        assert headers["DX-API-KEY"] == "test_api_key"
+        assert headers["DX-API-PASSPHRASE"] == "test_passphrase"
+
+        timestamp = headers["DX-API-TIMESTAMP"]
+        expected_signature_string = (
+            f"{timestamp}GET/api/accountstest_passphrase"
+        )
+        expected_signature = hmac.new(
+            "test_secret_key".encode("utf-8"),
+            expected_signature_string.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        assert headers["DX-API-SIGNATURE"] == b64encode(expected_signature).decode("utf-8")
+
+    def test_get_auth_headers_without_passphrase(self):
+        """Test auth headers without passphrase."""
+        credentials = HMACCredentials(
+            api_key="test_api_key",
+            secret_key="test_secret_key",
+        )
+        handler = HMACHandler(credentials)
+        headers = handler.get_auth_headers(method="GET", path="/api/accounts", body="")
+
+        assert "DX-API-PASSPHRASE" not in headers
+        timestamp = headers["DX-API-TIMESTAMP"]
+        expected_signature = hmac.new(
+            "test_secret_key".encode("utf-8"),
+            f"{timestamp}GET/api/accounts".encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        assert headers["DX-API-SIGNATURE"] == b64encode(expected_signature).decode("utf-8")
     """Test session authentication handler."""
     
     def test_init_with_valid_credentials(self, session_credentials):
@@ -210,6 +254,23 @@ class TestSessionHandler:
         
         assert authenticated_request.headers["X-Auth-Token"] == "valid_token"
         assert authenticated_request.headers["Authorization"] == "DXAPI valid_token"
+
+    def test_get_auth_headers_with_token(self, session_credentials):
+        """Test auth headers with an active token."""
+        handler = SessionHandler(session_credentials)
+        handler._session_token = "valid_token"
+        handler._token_expires_at = time.time() + 3600
+        handler._last_login = time.time()
+
+        headers = handler.get_auth_headers()
+
+        assert headers["X-Auth-Token"] == "valid_token"
+        assert headers["Authorization"] == "DXAPI valid_token"
+
+    def test_get_auth_headers_without_token(self, session_credentials):
+        """Test auth headers before any token is available."""
+        handler = SessionHandler(session_credentials)
+        assert handler.get_auth_headers() == {}
     
     @pytest.mark.asyncio
     async def test_authenticate_requires_login(self, session_credentials):

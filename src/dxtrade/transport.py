@@ -16,7 +16,7 @@ import logging
 import time
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Union
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import aiohttp
 import websockets
@@ -30,9 +30,21 @@ from .models import SessionCredentials
 logger = logging.getLogger(__name__)
 
 
+def _utc_timestamp() -> str:
+    """Return the current UTC time in the DXTrade Push timestamp format.
+
+    DXTrade Push messages carry a ``timestamp`` field in ISO-8601 UTC
+    format with milliseconds (e.g. ``2026-08-14T12:34:56.789Z``).
+
+    Returns:
+        Current UTC time with milliseconds
+    """
+    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ")[:-3] + "Z"
+
+
 class DXTradeTransport:
     """Minimal DXTrade transport client for raw API access."""
-    
+
     def __init__(self, config=None):
         """Initialize transport client.
         
@@ -42,11 +54,11 @@ class DXTradeTransport:
         if config is None:
             load_dotenv()
             config = load_config_from_env()
-        
+
         self.config = config
         self.base_url = config.base_url
         self.websocket_url = getattr(config, 'websocket_url', None)
-        
+
         # Session authentication
         self.credentials = SessionCredentials(
             username=config.auth.username,
@@ -54,31 +66,31 @@ class DXTradeTransport:
             domain=config.auth.domain
         )
         self.auth_handler = SessionHandler(self.credentials)
-        
+
         # HTTP session
         self._session: Optional[aiohttp.ClientSession] = None
-        
+
         # WebSocket connections
         self._websockets: Dict[str, websockets.WebSocketClientProtocol] = {}
         self._subscriptions: Dict[str, Callable] = {}
         self._ws_tasks: Dict[str, asyncio.Task] = {}
-        
+
         # Application-level ping/pong tracking
         self._ping_stats: Dict[str, Dict] = {}
         self._enable_ping_logging: bool = True
-        
+
         # WebSocket connection strategy tracking
         self._successful_strategies: Dict[str, str] = {}
-        
+
         # Log websockets library version for debugging
         self._log_websockets_version()
-    
+
     def _log_websockets_version(self):
         """Log websockets library version for debugging compatibility issues."""
         try:
             version = getattr(websockets, '__version__', 'unknown')
             logger.info(f"🔌 Using websockets library version: {version}")
-            
+
             # Log compatibility information
             if version != 'unknown':
                 major_version = int(version.split('.')[0]) if version.split('.')[0].isdigit() else 0
@@ -88,35 +100,35 @@ class DXTradeTransport:
                     logger.debug("WebSocket library supports legacy extra_headers parameter")
                 else:
                     logger.warning("WebSocket library version may have compatibility issues - consider upgrading to 11.0+")
-                    
+
         except Exception as e:
             logger.debug(f"Could not determine websockets version: {e}")
-    
+
     async def __aenter__(self):
         """Async context manager entry."""
         await self._ensure_session()
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
         await self.close()
-    
+
     async def _ensure_session(self):
         """Ensure HTTP session exists."""
         if self._session is None:
             self._session = aiohttp.ClientSession()
-    
+
     async def close(self):
         """Close all connections."""
         # Close WebSocket connections
         for channel in list(self._websockets.keys()):
             await self.unsubscribe(channel)
-        
+
         # Close HTTP session
         if self._session:
             await self._session.close()
             self._session = None
-    
+
     async def authenticate(self) -> str:
         """Authenticate and return session token.
         
@@ -127,43 +139,43 @@ class DXTradeTransport:
             Exception: Authentication failed
         """
         await self._ensure_session()
-        
+
         # Manual authentication since auth handler expects different client
         login_data = {
             "username": self.credentials.username,
             "password": self.credentials.password,
             "domain": self.credentials.domain or "default",
         }
-        
+
         # Use explicit login URL if available
         login_url = getattr(self.config.endpoints, 'login', '/login')
         if not login_url.startswith('http'):
             login_url = urljoin(self.base_url + '/', login_url.lstrip('/'))
-        
+
         logger.debug(f"Authenticating at {login_url}")
-        
+
         async with self._session.post(login_url, json=login_data) as response:
             response.raise_for_status()
             data = await response.json()
-            
+
             # Get sessionToken from response
             session_token = data.get("sessionToken")
             if not session_token:
                 error_msg = data.get("message") or "Login failed - no session token received"
                 raise Exception(error_msg)
-            
+
             # Store token in auth handler
             self.auth_handler._session_token = session_token
             self.auth_handler._last_login = time.time()
             self.auth_handler._token_expires_at = time.time() + 3600  # 1 hour
-            
+
             logger.info("Authentication successful")
             return session_token
-    
+
     async def request(
-        self, 
-        method: str, 
-        endpoint: str, 
+        self,
+        method: str,
+        endpoint: str,
         **kwargs
     ) -> Union[Dict[str, Any], list, str]:
         """Make raw HTTP request with authentication.
@@ -177,23 +189,22 @@ class DXTradeTransport:
             Raw response data (JSON parsed if possible)
         """
         await self._ensure_session()
-        
+
         # Ensure we have a valid session token
         token = self.auth_handler.get_session_token()
         if not token:
             token = await self.authenticate()
-        
+
         # Build full URL
         if endpoint.startswith('http'):
             url = endpoint
         else:
             url = urljoin(self.base_url + '/', endpoint.lstrip('/'))
-        
-        # Add auth headers
+
+        # Add auth headers from the auth handler (broker-specific scheme)
         headers = kwargs.pop('headers', {})
-        if token:
-            headers['X-Auth-Token'] = token
-        
+        headers.update(self.auth_handler.get_auth_headers())
+
         # Make request
         logger.debug(f"Making {method} request to {url}")
         async with self._session.request(method, url, headers=headers, **kwargs) as response:
@@ -201,22 +212,21 @@ class DXTradeTransport:
             if response.status == 401:
                 logger.info("Got 401, refreshing session token")
                 token = await self.authenticate()
-                
+
                 # Update headers with new token
-                if token:
-                    headers['X-Auth-Token'] = token
-                
+                headers.update(self.auth_handler.get_auth_headers())
+
                 # Retry with new token
                 async with self._session.request(method, url, headers=headers, **kwargs) as retry_response:
                     return await self._parse_response(retry_response)
-            
+
             return await self._parse_response(response)
-    
+
     async def _parse_response(self, response: aiohttp.ClientResponse) -> Union[Dict, list, str]:
         """Parse response, returning raw data."""
         # Raise for HTTP errors
         response.raise_for_status()
-        
+
         # Try to parse as JSON first
         content_type = response.headers.get('content-type', '')
         if 'json' in content_type:
@@ -224,10 +234,10 @@ class DXTradeTransport:
                 return await response.json()
             except Exception:
                 pass
-        
+
         # Fall back to text
         return await response.text()
-    
+
     async def subscribe(self, channel: str, callback: Callable[[dict], None], ws_url: Optional[str] = None):
         """Subscribe to WebSocket channel with raw message forwarding.
         
@@ -239,31 +249,51 @@ class DXTradeTransport:
         if channel in self._websockets:
             logger.warning(f"Already subscribed to channel: {channel}")
             return
-        
+
         # Use provided URL or build from config
         if ws_url is None:
             if hasattr(self.config, 'websocket') and self.config.websocket:
-                if channel == "quotes" or channel == "market_data":
-                    ws_url = getattr(self.config.websocket, 'market_data_url', None)
-                else:
-                    ws_url = getattr(self.config.websocket, 'portfolio_url', None)
-                    
-                # Fallback to base URL construction
-                if not ws_url and hasattr(self.config.websocket, 'base_url'):
-                    ws_url = self.config.websocket.base_url
-            
+                try:
+                    if channel == "quotes" or channel == "market_data":
+                        ws_url = self.config.websocket.get_market_data_url(self.base_url)
+                    else:
+                        ws_url = self.config.websocket.get_portfolio_url(self.base_url)
+                except ValueError:
+                    ws_url = None
+
             if not ws_url:
                 raise ValueError(f"No WebSocket URL configured for channel: {channel}")
-        
+
         logger.info(f"Subscribing to {channel} at {ws_url}")
-        
+
         # Store subscription
         self._subscriptions[channel] = callback
-        
+
         # Start WebSocket connection task
         task = asyncio.create_task(self._websocket_handler(channel, ws_url))
         self._ws_tasks[channel] = task
-    
+
+    async def wait_for_channel(self, channel: str, timeout: float = 30.0) -> bool:
+        """Wait until the WebSocket connection for a channel is established.
+
+        ``subscribe()`` starts the connection in the background; use this to
+        wait until it is ready (e.g. before sending a subscription message).
+
+        Args:
+            channel: Channel name (e.g. "quotes", "portfolio")
+            timeout: Maximum wait in seconds
+
+        Returns:
+            True if the channel connected, False on timeout
+        """
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            if channel in self._websockets:
+                return True
+            await asyncio.sleep(0.1)
+        return False
+
     async def _establish_websocket_connection(self, ws_url: str, token: Optional[str], channel: str):
         """Establish WebSocket connection with multiple compatibility approaches.
         
@@ -289,9 +319,9 @@ class DXTradeTransport:
             ("subprotocol_auth", self._connect_with_subprotocol_auth),
             ("post_connection_auth", self._connect_with_post_connection_auth),
         ]
-        
+
         last_error = None
-        
+
         for approach_name, connect_func in connection_approaches:
             try:
                 logger.debug(f"Trying WebSocket connection approach: {approach_name} for {channel}")
@@ -301,45 +331,39 @@ class DXTradeTransport:
                     # Track successful strategy for this channel
                     self._successful_strategies[channel] = approach_name
                     return websocket
-                    
+
             except Exception as e:
                 last_error = e
                 logger.debug(f"WebSocket approach {approach_name} failed for {channel}: {e}")
                 continue
-        
+
         # All approaches failed
         logger.error(f"❌ All WebSocket connection approaches failed for {channel}")
         if last_error:
             logger.error(f"Last error: {last_error}")
-        
+
         return None
-    
+
     async def _connect_with_additional_headers(self, ws_url: str, token: Optional[str]):
         """Connect using additional_headers parameter (websockets 11.0+)."""
         try:
-            headers = {}
-            if token:
-                headers['X-Auth-Token'] = token
-                
+            headers = self.auth_handler.get_auth_headers()
             return await websockets.connect(ws_url, additional_headers=headers)
         except TypeError as e:
             if 'additional_headers' in str(e):
                 raise Exception("additional_headers parameter not supported by this websockets version")
             raise
-    
+
     async def _connect_with_extra_headers(self, ws_url: str, token: Optional[str]):
-        """Connect using extra_headers parameter (websockets 9.0-10.x)."""  
+        """Connect using extra_headers parameter (websockets 9.0-10.x)."""
         try:
-            headers = {}
-            if token:
-                headers['X-Auth-Token'] = token
-                
+            headers = self.auth_handler.get_auth_headers()
             return await websockets.connect(ws_url, extra_headers=headers)
         except TypeError as e:
             if 'extra_headers' in str(e):
                 raise Exception("extra_headers parameter not supported by this websockets version")
             raise
-    
+
     async def _connect_with_subprotocol_auth(self, ws_url: str, token: Optional[str]):
         """Connect using subprotocol for authentication (fallback approach)."""
         try:
@@ -347,46 +371,46 @@ class DXTradeTransport:
             if token:
                 # Encode token in subprotocol (some servers support this)
                 subprotocols = [f"auth.{token}"]
-                
+
             return await websockets.connect(ws_url, subprotocols=subprotocols)
         except Exception as e:
             # Add context to subprotocol failures
             raise Exception(f"Subprotocol authentication failed: {e}")
-    
+
     async def _connect_with_post_connection_auth(self, ws_url: str, token: Optional[str]):
         """Connect without headers and authenticate after connection (last resort)."""
         try:
             websocket = await websockets.connect(ws_url)
-            
+
             if token:
                 # Send authentication message after connection
                 auth_message = {
-                    "type": "authenticate", 
+                    "type": "authenticate",
                     "token": token,
                     "channel": "auth"
                 }
                 await websocket.send(json.dumps(auth_message))
-                
+
                 # Wait for auth response with timeout
                 try:
                     response = await asyncio.wait_for(websocket.recv(), timeout=10.0)
                     auth_response = json.loads(response) if isinstance(response, str) else response
-                    
+
                     if isinstance(auth_response, dict) and auth_response.get('type') == 'auth_success':
                         logger.debug("Post-connection authentication successful")
                     else:
                         logger.warning(f"Unexpected auth response: {auth_response}")
-                        
+
                 except asyncio.TimeoutError:
                     logger.warning("No authentication response received (continuing anyway)")
                 except Exception as e:
                     logger.warning(f"Post-connection auth error: {e} (continuing anyway)")
-            
+
             return websocket
-            
+
         except Exception as e:
             raise Exception(f"Post-connection authentication approach failed: {e}")
-    
+
     async def _websocket_handler(self, channel: str, ws_url: str):
         """Handle WebSocket connection and messages."""
         try:
@@ -394,17 +418,17 @@ class DXTradeTransport:
             token = self.auth_handler.get_session_token()
             if not token:
                 token = await self.authenticate()
-            
+
             # Connect to WebSocket with compatibility fallbacks
             websocket = await self._establish_websocket_connection(ws_url, token, channel)
             if not websocket:
                 raise Exception(f"Failed to establish WebSocket connection for {channel}")
-            
+
             # Use connection in context manager style
             async with websocket:
                 self._websockets[channel] = websocket
                 logger.info(f"Connected to WebSocket for channel: {channel}")
-                
+
                 # Initialize ping stats for this channel
                 self._ping_stats[channel] = {
                     'ping_requests_received': 0,
@@ -413,10 +437,10 @@ class DXTradeTransport:
                     'last_ping_response': None,
                     'session_extensions': 0
                 }
-                
+
                 # Don't auto-send subscription - let user control it
                 # await self._send_dxtrade_subscription(websocket, channel, token)
-                
+
                 # Listen for messages
                 async for message in websocket:
                     try:
@@ -428,11 +452,11 @@ class DXTradeTransport:
                                 data = message
                         else:
                             data = message
-                        
+
                         # Handle application-level ping/pong for session management
                         if await self._handle_ping_pong(channel, data, websocket, token):
                             continue  # Skip forwarding ping/pong messages to user callback
-                        
+
                         # Forward raw message to callback
                         callback = self._subscriptions.get(channel)
                         if callback:
@@ -440,10 +464,10 @@ class DXTradeTransport:
                                 callback(data)
                             except Exception as e:
                                 logger.error(f"Error in callback for {channel}: {e}")
-                        
+
                     except Exception as e:
                         logger.error(f"Error processing message for {channel}: {e}")
-                        
+
         except Exception as e:
             logger.error(f"WebSocket error for {channel}: {e}")
         finally:
@@ -452,7 +476,7 @@ class DXTradeTransport:
             self._subscriptions.pop(channel, None)
             self._ping_stats.pop(channel, None)
             self._successful_strategies.pop(channel, None)
-    
+
     async def _handle_ping_pong(self, channel: str, data: Union[dict, str], websocket: websockets.WebSocketClientProtocol, token: str) -> bool:
         """Handle application-level ping/pong for DXTrade session management.
         
@@ -469,18 +493,18 @@ class DXTradeTransport:
             # Check if this is a PingRequest from server
             if isinstance(data, dict) and data.get("type") == "PingRequest":
                 timestamp = datetime.now()
-                
+
                 # Update stats
-                stats = self._ping_stats.get(channel, {})
+                stats = self._ping_stats.setdefault(channel, {})
                 stats['ping_requests_received'] = stats.get('ping_requests_received', 0) + 1
                 stats['last_ping_request'] = timestamp
                 stats['session_extensions'] = stats.get('session_extensions', 0) + 1
-                
+
                 # Log ping request activity
                 if self._enable_ping_logging:
                     logger.info(f"🔄 Received PingRequest on channel '{channel}' - extending session")
                     logger.debug(f"   Ping stats: {stats['ping_requests_received']} requests, {stats['session_extensions']} extensions")
-                
+
                 # Send DXTrade Ping response with session and timestamp
                 ping_response = {
                     "type": "Ping",
@@ -488,50 +512,50 @@ class DXTradeTransport:
                     "timestamp": timestamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ")[:-3] + "Z"  # ISO format with milliseconds
                 }
                 await websocket.send(json.dumps(ping_response))
-                
+
                 # Update response stats
                 stats['ping_responses_sent'] = stats.get('ping_responses_sent', 0) + 1
                 stats['last_ping_response'] = timestamp
-                
+
                 # Log successful ping response
                 if self._enable_ping_logging:
                     logger.info(f"✅ Sent Ping response on channel '{channel}' - session extended")
-                
+
                 return True  # Message was handled, don't forward to user callback
-                
+
             # Check if this is a string-based ping request (alternative format)
             elif isinstance(data, str) and data.lower() in ["pingrequest", "ping_request"]:
                 timestamp = datetime.now()
-                
+
                 # Update stats
-                stats = self._ping_stats.get(channel, {})
+                stats = self._ping_stats.setdefault(channel, {})
                 stats['ping_requests_received'] = stats.get('ping_requests_received', 0) + 1
                 stats['last_ping_request'] = timestamp
                 stats['session_extensions'] = stats.get('session_extensions', 0) + 1
-                
+
                 # Log ping request activity
                 if self._enable_ping_logging:
                     logger.info(f"🔄 Received string PingRequest '{data}' on channel '{channel}' - extending session")
-                
+
                 # Send string-based Ping response
                 await websocket.send("Ping")
-                
+
                 # Update response stats
                 stats['ping_responses_sent'] = stats.get('ping_responses_sent', 0) + 1
                 stats['last_ping_response'] = timestamp
-                
+
                 # Log successful ping response
                 if self._enable_ping_logging:
                     logger.info(f"✅ Sent Ping response on channel '{channel}' - session extended")
-                
+
                 return True  # Message was handled, don't forward to user callback
-            
+
             return False  # Not a ping/pong message
-            
+
         except Exception as e:
             logger.error(f"Error handling ping/pong for channel '{channel}': {e}")
             return False
-    
+
     async def unsubscribe(self, channel: str):
         """Unsubscribe from WebSocket channel."""
         # Cancel task
@@ -542,17 +566,17 @@ class DXTradeTransport:
                 await task
             except asyncio.CancelledError:
                 pass
-        
+
         # Close WebSocket
         websocket = self._websockets.pop(channel, None)
         if websocket:
             await websocket.close()
-        
+
         # Remove subscription
         self._subscriptions.pop(channel, None)
-        
+
         logger.info(f"Unsubscribed from channel: {channel}")
-    
+
     def enable_ping_logging(self, enabled: bool = True):
         """Enable or disable ping/pong activity logging.
         
@@ -564,7 +588,7 @@ class DXTradeTransport:
             logger.info("✅ DXTrade application-level ping/pong logging enabled")
         else:
             logger.info("❌ DXTrade application-level ping/pong logging disabled")
-    
+
     def get_ping_stats(self, channel: Optional[str] = None) -> Union[Dict, Dict[str, Dict]]:
         """Get ping/pong statistics for session monitoring.
         
@@ -577,7 +601,7 @@ class DXTradeTransport:
         if channel:
             return self._ping_stats.get(channel, {})
         return self._ping_stats.copy()
-    
+
     def get_session_health(self) -> Dict[str, Any]:
         """Get overall session health metrics for monitoring bridge status.
         
@@ -587,10 +611,10 @@ class DXTradeTransport:
         total_ping_requests = sum(stats.get('ping_requests_received', 0) for stats in self._ping_stats.values())
         total_ping_responses = sum(stats.get('ping_responses_sent', 0) for stats in self._ping_stats.values())
         total_extensions = sum(stats.get('session_extensions', 0) for stats in self._ping_stats.values())
-        
+
         active_channels = len(self._websockets)
         healthy_channels = len([ch for ch, ws in self._websockets.items() if self._is_websocket_healthy(ws)])
-        
+
         return {
             'active_channels': active_channels,
             'healthy_channels': healthy_channels,
@@ -599,13 +623,13 @@ class DXTradeTransport:
             'total_ping_responses_sent': total_ping_responses,
             'total_session_extensions': total_extensions,
             'ping_response_success_rate': total_ping_responses / total_ping_requests if total_ping_requests > 0 else 1.0,
-            'last_activity': max([stats.get('last_ping_response') for stats in self._ping_stats.values() 
+            'last_activity': max([stats.get('last_ping_response') for stats in self._ping_stats.values()
                                 if stats.get('last_ping_response')], default=None),
             'channels': list(self._websockets.keys()),
             'connection_strategies': self._successful_strategies.copy(),
             'websockets_version': getattr(websockets, '__version__', 'unknown')
         }
-    
+
     def _is_websocket_healthy(self, websocket: websockets.WebSocketClientProtocol) -> bool:
         """Check if WebSocket connection is healthy.
         
@@ -640,7 +664,7 @@ class DXTradeTransport:
             Dictionary mapping channel names to connection strategy names
         """
         return self._successful_strategies.copy()
-    
+
     def check_websockets_compatibility(self) -> Dict[str, Any]:
         """Check websockets library compatibility and provide recommendations.
         
@@ -649,7 +673,7 @@ class DXTradeTransport:
         """
         try:
             version = getattr(websockets, '__version__', 'unknown')
-            
+
             if version == 'unknown':
                 return {
                     'version': 'unknown',
@@ -657,10 +681,10 @@ class DXTradeTransport:
                     'message': 'Cannot determine websockets library version',
                     'recommendations': ['Check websockets installation', 'Consider reinstalling websockets>=12.0']
                 }
-            
+
             major_version = int(version.split('.')[0]) if version.split('.')[0].isdigit() else 0
             minor_version = int(version.split('.')[1]) if len(version.split('.')) > 1 and version.split('.')[1].isdigit() else 0
-            
+
             if major_version >= 12:
                 return {
                     'version': version,
@@ -689,7 +713,7 @@ class DXTradeTransport:
                     'message': 'Poor compatibility - connection issues likely',
                     'recommendations': ['Upgrade to websockets>=12.0 immediately', 'Current version may cause connection failures']
                 }
-                
+
         except Exception as e:
             return {
                 'version': 'error',
@@ -697,7 +721,7 @@ class DXTradeTransport:
                 'message': f'Error checking websockets compatibility: {e}',
                 'recommendations': ['Check websockets installation', 'Reinstall websockets>=12.0']
             }
-    
+
     async def _send_dxtrade_subscription(self, websocket: websockets.WebSocketClientProtocol, channel: str, session_token: str):
         """Send DXTrade-specific subscription message.
         
@@ -708,9 +732,9 @@ class DXTradeTransport:
         """
         import uuid
         from datetime import datetime
-        
+
         request_id = str(uuid.uuid4())
-        
+
         # Get account from config or environment
         account = getattr(self.config, 'account', None)
         if not account:
@@ -718,13 +742,14 @@ class DXTradeTransport:
             domain = getattr(self.config.auth, 'domain', 'default')
             account_name = os.getenv('DXTRADE_ACCOUNT_NAME', 'demo')
             account = f"{domain}:{account_name}"
-        
+
         try:
             if channel in ["quotes", "market_data"]:
                 # Market Data Subscription Request
                 subscription_message = {
                     "type": "MarketDataSubscriptionRequest",
                     "requestId": request_id,
+                    "timestamp": _utc_timestamp(),
                     "session": session_token,
                     "payload": {
                         "account": account,
@@ -733,28 +758,29 @@ class DXTradeTransport:
                     }
                 }
             else:
-                # Account/Portfolio Subscription Request 
+                # Account/Portfolio Subscription Request
                 subscription_message = {
-                    "type": "AccountPortfoliosSubscriptionRequest", 
+                    "type": "AccountPortfoliosSubscriptionRequest",
                     "requestId": request_id,
+                    "timestamp": _utc_timestamp(),
                     "session": session_token,
                     "payload": {
-                        "account": account,
-                        "eventTypes": [{"type": "Position", "format": "COMPACT"}]
+                        "requestType": "LIST",
+                        "accounts": [account]
                     }
                 }
-            
+
             logger.info(f"📡 Sending DXTrade subscription for {channel}: {account}")
             logger.debug(f"Subscription message: {subscription_message}")
-            
+
             await websocket.send(json.dumps(subscription_message))
-            
+
         except Exception as e:
             logger.error(f"Error sending DXTrade subscription for {channel}: {e}")
             # Fallback to simple subscription
             fallback_message = {"type": "subscribe", "channel": channel}
             await websocket.send(json.dumps(fallback_message))
-    
+
     async def send_market_data_subscription(self, symbols: list, account: Optional[str] = None, event_types: Optional[list] = None) -> Optional[dict]:
         """Send market data subscription with DXTrade format.
         
@@ -767,12 +793,12 @@ class DXTradeTransport:
             Response message if any
         """
         import uuid
-        
+
         # Get session token
         token = self.auth_handler.get_session_token()
         if not token:
             raise ValueError("No session token available")
-        
+
         # Use provided account or get from config
         if not account:
             account = getattr(self.config, 'account', None)
@@ -780,15 +806,16 @@ class DXTradeTransport:
                 domain = getattr(self.config.auth, 'domain', 'default')
                 account_name = os.getenv('DXTRADE_ACCOUNT_NAME', 'demo')
                 account = f"{domain}:{account_name}"
-        
+
         # Default event types
         if not event_types:
             event_types = [{"type": "Quote", "format": "COMPACT"}]
-        
+
         # Create subscription message
         subscription_message = {
             "type": "MarketDataSubscriptionRequest",
             "requestId": str(uuid.uuid4()),
+            "timestamp": _utc_timestamp(),
             "session": token,
             "payload": {
                 "account": account,
@@ -796,34 +823,37 @@ class DXTradeTransport:
                 "eventTypes": event_types
             }
         }
-        
+
         # Send via quotes channel
         websocket = self._websockets.get("quotes")
         if not websocket:
             raise ValueError("Not connected to market data channel")
-        
+
         await websocket.send(json.dumps(subscription_message))
         logger.info(f"📡 Sent market data subscription: {symbols} on account {account}")
-        
+
         return None
-    
-    async def send_portfolio_subscription(self, account: Optional[str] = None, event_types: Optional[list] = None) -> Optional[dict]:
+
+    async def send_portfolio_subscription(self, account: Optional[str] = None) -> Optional[dict]:
         """Send portfolio subscription with DXTrade format.
-        
+
+        The DXTrade Push API expects the account portfolios subscription
+        payload to list accounts (``requestType``/``accounts``); see the
+        DXtrade Push API specification.
+
         Args:
             account: Account identifier (defaults to config account)
-            event_types: Event types to subscribe to (defaults to Position COMPACT)
-            
+
         Returns:
             Response message if any
         """
         import uuid
-        
+
         # Get session token
         token = self.auth_handler.get_session_token()
         if not token:
             raise ValueError("No session token available")
-        
+
         # Use provided account or get from config
         if not account:
             account = getattr(self.config, 'account', None)
@@ -831,69 +861,58 @@ class DXTradeTransport:
                 domain = getattr(self.config.auth, 'domain', 'default')
                 account_name = os.getenv('DXTRADE_ACCOUNT_NAME', 'demo')
                 account = f"{domain}:{account_name}"
-        
-        # Default event types
-        if not event_types:
-            event_types = [{"type": "Position", "format": "COMPACT"}]
-        
+
         # Create subscription message
         subscription_message = {
             "type": "AccountPortfoliosSubscriptionRequest",
             "requestId": str(uuid.uuid4()),
+            "timestamp": _utc_timestamp(),
             "session": token,
             "payload": {
-                "account": account,
-                "eventTypes": event_types
-            }
+                "requestType": "LIST",
+                "accounts": [account],
+            },
         }
-        
+
         # Send via portfolio channel
         websocket = self._websockets.get("portfolio")
         if not websocket:
             raise ValueError("Not connected to portfolio channel")
-        
+
         await websocket.send(json.dumps(subscription_message))
         logger.info(f"📡 Sent portfolio subscription on account {account}")
-        
+
         return None
 
     async def send_message(self, channel: str, message: Union[dict, str]) -> Optional[dict]:
         """Send raw message to WebSocket channel.
-        
+
+        Incoming messages are delivered to the channel's callback by the
+        background message handler, so sending never blocks on a reply.
+
         Args:
             channel: Channel name
             message: Message to send (dict will be JSON encoded)
-            
+
         Returns:
-            Response message if any
+            None (replies arrive via the channel callback)
         """
         websocket = self._websockets.get(channel)
         if not websocket:
             raise ValueError(f"Not connected to channel: {channel}")
-        
+
         # Encode message if needed
         if isinstance(message, dict):
             message = json.dumps(message)
-        
+
         await websocket.send(message)
-        
-        # Wait for response (optional - might want to handle differently)
-        try:
-            response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-            if isinstance(response, str):
-                try:
-                    return json.loads(response)
-                except json.JSONDecodeError:
-                    return response
-            return response
-        except asyncio.TimeoutError:
-            return None
-    
+        return None
+
     # Convenience methods for common operations
     async def get_accounts(self) -> Union[Dict, list]:
         """Get accounts (raw data)."""
         return await self.request("GET", "/accounts")
-    
+
     async def get_orders(self, account_id: Optional[str] = None) -> Union[Dict, list]:
         """Get orders (raw data)."""
         endpoint = "/orders"
@@ -901,11 +920,11 @@ class DXTradeTransport:
         if account_id:
             params['account_id'] = account_id
         return await self.request("GET", endpoint, params=params)
-    
+
     async def create_order(self, order_data: dict) -> dict:
         """Create order (raw data)."""
         return await self.request("POST", "/orders", json=order_data)
-    
+
     async def get_positions(self, account_id: Optional[str] = None) -> Union[Dict, list]:
         """Get positions (raw data)."""
         endpoint = "/positions"
@@ -913,7 +932,7 @@ class DXTradeTransport:
         if account_id:
             params['account_id'] = account_id
         return await self.request("GET", endpoint, params=params)
-    
+
     async def get_quotes(self, symbols: Optional[list] = None) -> Union[Dict, list]:
         """Get quotes (raw data)."""
         endpoint = "/quotes"
@@ -921,10 +940,236 @@ class DXTradeTransport:
         if symbols:
             params['symbols'] = ','.join(symbols)
         return await self.request("GET", endpoint, params=params)
-    
+
     async def get_server_time(self) -> Union[Dict, str]:
         """Get server time (raw data)."""
         return await self.request("GET", "/time")
+
+    # ------------------------------------------------------------------
+    # DXTrade REST API methods (per the official OpenAPI specification)
+    # ------------------------------------------------------------------
+    # These methods follow the DXTrade REST API resource layout shared by
+    # all DXTrade brokers (accounts are addressed by their full code, e.g.
+    # "default:12345", percent-encoded in the path).
+
+    @staticmethod
+    def _encode_account(account: str) -> str:
+        """Percent-encode an account code for use in a REST path.
+
+        DXTrade account codes contain a colon (``default:12345``); the
+        colon must be percent-encoded (``default%3A12345``) when the code
+        is placed in a path segment.
+
+        Args:
+            account: Full account code (e.g. ``default:12345``)
+
+        Returns:
+            Percent-encoded account code
+        """
+        return quote(account, safe="")
+
+    async def get_users(self) -> Union[Dict[str, Any], list, str]:
+        """Get users and the accounts they can access.
+
+        Account discovery: the response contains the full account codes
+        (e.g. ``default:12345``) used to address account-scoped resources.
+
+        Returns:
+            Raw users/accounts response
+        """
+        return await self.request("GET", "/users")
+
+    async def get_account_metrics(self, account: str) -> Union[Dict[str, Any], list, str]:
+        """Get account metrics (equity, balance, margin, PnL).
+
+        Args:
+            account: Full account code (e.g. ``default:12345``)
+
+        Returns:
+            Raw account metrics response
+        """
+        return await self.request(
+            "GET", f"/accounts/{self._encode_account(account)}/metrics"
+        )
+
+    async def get_account_portfolio(self, account: str) -> Union[Dict[str, Any], list, str]:
+        """Get the account portfolio (open positions and working orders).
+
+        Args:
+            account: Full account code (e.g. ``default:12345``)
+
+        Returns:
+            Raw account portfolio response
+        """
+        return await self.request(
+            "GET", f"/accounts/{self._encode_account(account)}/portfolio"
+        )
+
+    async def get_account_positions(self, account: str) -> Union[Dict[str, Any], list, str]:
+        """Get open positions for an account.
+
+        Args:
+            account: Full account code (e.g. ``default:12345``)
+
+        Returns:
+            Raw positions response
+        """
+        return await self.request(
+            "GET", f"/accounts/{self._encode_account(account)}/positions"
+        )
+
+    async def get_account_orders(self, account: str) -> Union[Dict[str, Any], list, str]:
+        """Get orders for an account.
+
+        Args:
+            account: Full account code (e.g. ``default:12345``)
+
+        Returns:
+            Raw orders response
+        """
+        return await self.request(
+            "GET", f"/accounts/{self._encode_account(account)}/orders"
+        )
+
+    async def get_account_orders_history(self, account: str) -> Union[Dict[str, Any], list, str]:
+        """Get order history for an account.
+
+        Args:
+            account: Full account code (e.g. ``default:12345``)
+
+        Returns:
+            Raw order history response
+        """
+        return await self.request(
+            "GET", f"/accounts/{self._encode_account(account)}/orders/history"
+        )
+
+    async def query_instruments(
+        self,
+        symbols: Optional[list] = None,
+        account: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> Union[Dict[str, Any], list, str]:
+        """Query available instruments.
+
+        Args:
+            symbols: Optional list of symbols to filter by
+            account: Optional full account code (e.g. ``default:12345``).
+                Account-scoped discovery is recommended because instrument
+                availability is account-specific.
+            limit: Optional maximum number of results
+
+        Returns:
+            Raw instruments response
+        """
+        params: Dict[str, Any] = {}
+        if symbols:
+            params['symbols'] = ','.join(symbols)
+        if limit is not None:
+            params['limit'] = limit
+
+        if account:
+            endpoint = f"/accounts/{self._encode_account(account)}/instruments/query"
+        else:
+            endpoint = "/instruments/query"
+        return await self.request("GET", endpoint, params=params)
+
+    async def get_market_data(
+        self,
+        symbols: list,
+        event_types: Optional[list] = None,
+        account: Optional[str] = None,
+    ) -> Union[Dict[str, Any], list, str]:
+        """Request a market data snapshot over REST.
+
+        Args:
+            symbols: List of symbols to request data for
+            event_types: Event types to request (defaults to
+                ``[{"type": "Quote", "format": "COMPACT"}]``)
+            account: Optional full account code (e.g. ``default:12345``)
+
+        Returns:
+            Raw market data response
+        """
+        if not event_types:
+            event_types = [{"type": "Quote", "format": "COMPACT"}]
+        payload: Dict[str, Any] = {"symbols": symbols, "eventTypes": event_types}
+        if account:
+            payload["account"] = account
+        return await self.request("POST", "/marketdata", json=payload)
+
+    async def ping(self) -> Union[Dict[str, Any], list, str]:
+        """Validate the session and refresh the token if the server returns one.
+
+        The server may return a fresh ``sessionToken``; when present the
+        stored token is updated so subsequent requests stay authenticated.
+
+        Returns:
+            Raw ping response
+        """
+        response = await self.request("POST", "/ping")
+        if isinstance(response, dict):
+            new_token = response.get("sessionToken")
+            if new_token:
+                self.auth_handler._session_token = new_token
+                self.auth_handler._token_expires_at = time.time() + 3600
+                self.auth_handler._last_login = time.time()
+        return response
+
+    async def logout(self) -> Union[Dict[str, Any], list, str]:
+        """Invalidate the session on the server and clear the local token.
+
+        Returns:
+            Raw logout response
+        """
+        try:
+            return await self.request("POST", "/logout")
+        finally:
+            self.auth_handler._session_token = None
+            self.auth_handler._token_expires_at = None
+            self.auth_handler._last_login = None
+
+    async def place_order(self, account: str, order: Dict[str, Any]) -> Union[Dict[str, Any], list, str]:
+        """Place an order on an account.
+
+        ``order`` follows the DXTrade ``SingleOrderRequest`` schema: at minimum
+        ``orderCode`` (client-generated, unique per account), ``type``
+        (``MARKET``/``LIMIT``/``STOP``), ``instrument``, ``side`` (``BUY``/
+        ``SELL``), and ``tif`` (e.g. ``GTC``). For closing positions set
+        ``positionEffect: "CLOSE"`` plus the ``positionCode`` and the opposite
+        ``side``; omit ``quantity`` to close the full position.
+
+        A ``200`` response is an acknowledgement, not proof of execution —
+        confirm fills via ``get_account_orders``/``get_account_positions``.
+
+        Args:
+            account: Full account code (e.g. ``default:12345``)
+            order: SingleOrderRequest fields
+
+        Returns:
+            Raw order response
+        """
+        payload = dict(order)
+        payload.setdefault("account", account)
+        return await self.request(
+            "POST", f"/accounts/{self._encode_account(account)}/orders", json=payload
+        )
+
+    async def cancel_order(self, account: str, order: str) -> Union[Dict[str, Any], list, str]:
+        """Cancel a working order.
+
+        Args:
+            account: Full account code (e.g. ``default:12345``)
+            order: Order code — either the client order code or the system
+                order id
+
+        Returns:
+            Raw cancel response
+        """
+        encoded_order = quote(order, safe="")
+        return await self.request(
+            "DELETE", f"/accounts/{self._encode_account(account)}/orders/{encoded_order}"
+        )
 
 
 # Convenience factory function
